@@ -585,6 +585,10 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
 
 // Main function
 int main(int argc, char* argv[]) {
+
+    cout << endl;
+    cout << "----------------- PARALLEL SSSP : MPI + OpenMP Version -----------------\n" << endl;
+
     MPI_Init(&argc, &argv);
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);

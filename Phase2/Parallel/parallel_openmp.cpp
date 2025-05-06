@@ -176,6 +176,9 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>> &G, SSSPTree &T, con
 }
 
 int main() {
+
+    cout << endl;
+    cout << "----------------- PARALLEL SSSP : OpenMP Version -----------------\n" << endl;
     double start_time, end_time;
 
     // Read graph file

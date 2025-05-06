@@ -158,3 +158,6 @@ int main(int argc, char* argv[]) {
 
     return 0;
 }
+
+// g++ graph-subgraph.cpp -o ex -lmetis
+// ./ex 3

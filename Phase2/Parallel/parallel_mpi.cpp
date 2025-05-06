@@ -582,21 +582,9 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
     // }
 }
 
-// Main function
-#include <iostream>
-#include <vector>
-#include <set>
-#include <map>
-#include <fstream>
-#include <sstream>
-#include <iomanip>
-#include <mpi.h>
-#include <limits>
-#include <algorithm>
-
-using namespace std;
-
 int main(int argc, char* argv[]) {
+    cout << endl;
+    cout << "----------------- PARALLEL SSSP : MPI Version -----------------\n" << endl;
     MPI_Init(&argc, &argv);
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -803,7 +791,7 @@ int main(int argc, char* argv[]) {
             }
         }
         out.close();
-        cout << "Output written to output.txt" << endl;
+        cout << "Output written to output_mpi.txt" << endl;
     }
 
     double total_end_time = MPI_Wtime();

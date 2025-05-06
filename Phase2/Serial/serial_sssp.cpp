@@ -181,6 +181,9 @@ void readChangesFromFile(const string& filename, Graph* graph, vector<double>& D
 
 // Main
 int main() {
+
+    cout << endl;
+    cout << "----------------- SERIAL SSSP -----------------\n" << endl;
     double start_time, end_time;
 
     // Step 1: Read graph from file
