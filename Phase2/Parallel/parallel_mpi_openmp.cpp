@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <chrono>
 #include <mpi.h>
 
 using namespace std;
@@ -589,6 +590,9 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 
+    double start_total = MPI_Wtime();
+    double start, end;
+
     if (rank == 0) {
         cout << "Number of subgraphs: " << num_procs << endl;
     }
@@ -597,7 +601,11 @@ int main(int argc, char* argv[]) {
     set<int> local_nodes, ghost_nodes;
     map<int, int> ghost_to_owner;
     int n, edge_count;
+
+    start = MPI_Wtime();
     LoadSubgraph(rank, G, local_nodes, ghost_nodes, ghost_to_owner, n, edge_count);
+    end = MPI_Wtime();
+    if (rank == 0) cout << "[Time] LoadSubgraph: " << (end - start) << " seconds" << endl;
 
     int total_edges = 0;
     MPI_Reduce(&edge_count, &total_edges, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
@@ -609,9 +617,13 @@ int main(int argc, char* argv[]) {
     int A = max(50, n / 100);
 
     SSSPTree T(n);
+    start = MPI_Wtime();
     ComputeInitialSSSP(G, T, source, local_nodes, ghost_nodes, rank, num_procs, n);
+    end = MPI_Wtime();
+    if (rank == 0) cout << "[Time] ComputeInitialSSSP: " << (end - start) << " seconds" << endl;
 
     vector<Edge> Del, Ins;
+    start = MPI_Wtime();
     LoadChanges(rank, Del, Ins, n);
     // Broadcast changes to all ranks
     int del_size = Del.size();
@@ -648,10 +660,15 @@ int main(int argc, char* argv[]) {
             Ins.emplace_back(data[0], data[1], data[2] / 1000.0);
         }
     }
+    end = MPI_Wtime();
+    if (rank == 0) cout << "[Time] Load & Broadcast Changes: " << (end - start) << " seconds" << endl;
 
+    start = MPI_Wtime();
     AsynchronousUpdating(G, T, Del, Ins, source, A, local_nodes, ghost_nodes, ghost_to_owner, rank, num_procs);
+    end = MPI_Wtime();
+    if (rank == 0) cout << "[Time] AsynchronousUpdating: " << (end - start) << " seconds" << endl;
 
-    // Reconcile ghost node values
+    start = MPI_Wtime();
     vector<double> local_ghost_dist(n, numeric_limits<double>::infinity());
     vector<int> local_ghost_parent(n, -1);
     for (int v : local_nodes) {
@@ -673,12 +690,10 @@ int main(int argc, char* argv[]) {
         }
     }
     T.parent[source] = -1;
+    end = MPI_Wtime();
+    if (rank == 0) cout << "[Time] Ghost Reconciliation: " << (end - start) << " seconds" << endl;
 
-    // cout << "Rank " << rank << " before output collection:" << endl;
-    // for (int v : local_nodes) {
-    //     cout << "Vertex " << v << ": Dist = " << T.dist[v] << ", Parent = " << T.parent[v] << endl;
-    // }
-
+    start = MPI_Wtime();
     vector<pair<int, pair<double, int>>> local_output;
     for (int v : local_nodes) {
         local_output.emplace_back(v, make_pair(T.dist[v], T.parent[v]));
@@ -697,11 +712,6 @@ int main(int argc, char* argv[]) {
     string local_output_str = ss.str();
     int local_size = local_output_str.size();
 
-    // if (rank == 0) {
-    //     cout << "Rank " << rank << ": Local output string (" << local_size << " bytes):" << endl;
-    //     cout << local_output_str << endl;
-    // }
-
     vector<int> output_sizes(num_procs);
     MPI_Gather(&local_size, 1, MPI_INT, output_sizes.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
 
@@ -713,15 +723,6 @@ int main(int argc, char* argv[]) {
             displacements[i] = total_size;
             total_size += output_sizes[i];
         }
-        // cout << "Rank 0: Output sizes: ";
-        // for (int i = 0; i < num_procs; ++i) {
-        //     cout << output_sizes[i] << " ";
-        // }
-        // cout << "\nRank 0: Displacements: ";
-        // for (int i = 0; i < num_procs; ++i) {
-        //     cout << displacements[i] << " ";
-        // }
-        // cout << endl;
     }
 
     vector<char> all_output(total_size);
@@ -729,10 +730,7 @@ int main(int argc, char* argv[]) {
 
     if (rank == 0) {
         string all_output_str(all_output.begin(), all_output.end());
-        // cout << "Rank 0: Collected output string (" << all_output_str.size() << " bytes):" << endl;
-        // cout << all_output_str << endl;
-
-        ofstream out("output.txt");
+        ofstream out("output_mpi_openmp.txt");
         if (!out.is_open()) {
             cerr << "Rank 0: Error: Could not open output.txt" << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
@@ -772,12 +770,16 @@ int main(int argc, char* argv[]) {
             }
         }
         out.close();
+        cout << "[Time] Output Gathering: " << (MPI_Wtime() - end) << " seconds" << endl;
         cout << "Output written to output.txt" << endl;
     }
+
+    double end_total = MPI_Wtime();
+    if (rank == 0) cout << "[Total Time] Entire Execution: " << (end_total - start_total) << " seconds" << endl;
 
     MPI_Finalize();
     return 0;
 }
 
-// mpicxx -o temp mpi_openmp.cpp -lmetis -fopenmp
-// mpirun -np 2 ./temp
+// mpicxx -o e_mpi_omp parallel_mpi_openmp.cpp -fopenmp
+// time mpirun -np 2 ./e_mpi_omp

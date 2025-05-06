@@ -2,18 +2,19 @@
 #include <vector>
 #include <list>
 #include <queue>
-#include <climits>
+#include <limits>
 #include <fstream>
 #include <sstream>
-#include <functional>
+#include <iomanip>
+#include <omp.h>
 
 using namespace std;
 
 // Structure for an edge
 struct Edge {
     int to;
-    long long weight;
-    Edge(int t, long long w) : to(t), weight(w) {}
+    double weight;
+    Edge(int t, double w) : to(t), weight(w) {}
 };
 
 // Graph class using adjacency list representation
@@ -28,7 +29,7 @@ public:
         this->active.assign(V, true);
     }
 
-    void addEdge(int from, int to, long long weight) {
+    void addEdge(int from, int to, double weight) {
         if (from >= V || to >= V || !active[from] || !active[to]) return;
         vertices[from].emplace_back(to, weight);
         vertices[to].emplace_back(from, weight);
@@ -56,23 +57,6 @@ public:
 
         return deleted;
     }
-
-    void deleteNode(int node) {
-        if (node >= V || !active[node]) return;
-        active[node] = false;
-        vertices[node].clear();
-
-        for (int u = 0; u < V; u++) {
-            if (!active[u]) continue;
-            for (auto it = vertices[u].begin(); it != vertices[u].end();) {
-                if (it->to == node) {
-                    it = vertices[u].erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-    }
 };
 
 // Function to read the initial graph from a file
@@ -91,7 +75,16 @@ Graph* readGraphFromFile(const string& filename) {
         stringstream ss(line);
         int from, to;
         double distance;
-        ss >> from >> to >> distance;
+        if (!(ss >> from >> to >> distance)) {
+            cerr << "Error: Invalid edge format in " << filename << endl;
+            file.close();
+            return nullptr;
+        }
+        if (distance < 0) {
+            cerr << "Error: Negative weight detected in " << filename << endl;
+            file.close();
+            return nullptr;
+        }
         maxVertex = max(maxVertex, max(from, to));
         edges.emplace_back(from, to, distance);
     }
@@ -104,7 +97,7 @@ Graph* readGraphFromFile(const string& filename) {
     for (const auto& edge : edges) {
         int from = get<0>(edge);
         int to = get<1>(edge);
-        long long weight = static_cast<long long>(get<2>(edge));
+        double weight = get<2>(edge);
         graph->addEdge(from, to, weight);
     }
 
@@ -112,11 +105,11 @@ Graph* readGraphFromFile(const string& filename) {
 }
 
 // Dijkstra's algorithm
-void dijkstra(Graph& graph, int source, vector<long long>& Dist, vector<int>& Parent) {
-    using PQNode = pair<long long, int>;
+void dijkstra(Graph& graph, int source, vector<double>& Dist, vector<int>& Parent) {
+    using PQNode = pair<double, int>;
     priority_queue<PQNode, vector<PQNode>, greater<PQNode>> pq;
 
-    Dist.assign(graph.V, LLONG_MAX);
+    Dist.assign(graph.V, numeric_limits<double>::infinity());
     Parent.assign(graph.V, -1);
     if (!graph.active[source]) return;
 
@@ -131,7 +124,7 @@ void dijkstra(Graph& graph, int source, vector<long long>& Dist, vector<int>& Pa
 
         for (const Edge& edge : graph.vertices[u]) {
             int v = edge.to;
-            long long weight = edge.weight;
+            double weight = edge.weight;
             if (!graph.active[v]) continue;
 
             if (Dist[v] > Dist[u] + weight) {
@@ -143,14 +136,8 @@ void dijkstra(Graph& graph, int source, vector<long long>& Dist, vector<int>& Pa
     }
 }
 
-// Recompute SSSP from scratch on every update
-void UpdateSingleChange(Graph& graph, int source, vector<long long>& Dist, vector<int>& Parent,
-                        int u, int v, long long W_uv, bool isDeletion = false) {
-    dijkstra(graph, source, Dist, Parent);
-}
-
 // Apply changes from a file
-void readChangesFromFile(const string& filename, Graph* graph, vector<long long>& Dist, vector<int>& Parent, int source) {
+void readChangesFromFile(const string& filename, Graph* graph, vector<double>& Dist, vector<int>& Parent, int source) {
     ifstream file(filename);
     if (!file.is_open()) {
         cerr << "Error: Could not open changes file " << filename << endl;
@@ -165,29 +152,27 @@ void readChangesFromFile(const string& filename, Graph* graph, vector<long long>
         char type;
         int u, v;
         double w;
-        ss >> type >> u >> v >> w;
-        long long weight = static_cast<long long>(w);
-
-        if (type == 'D' || type == 'd') {
-            cout << "\nDeleting edge e(" << u << "," << v << ") with weight " << w << ":\n";
-            if (graph->deleteEdge(u, v)) {
-                UpdateSingleChange(*graph, source, Dist, Parent, u, v, LLONG_MAX, true);
-            } else {
-                cout << "Edge not found.\n";
-            }
-        } else if (type == 'I' || type == 'i') {
-            cout << "\nAdding edge e(" << u << "," << v << ") with weight " << w << ":\n";
-            graph->addEdge(u, v, weight);
-            UpdateSingleChange(*graph, source, Dist, Parent, u, v, weight, false);
-        } else {
-            cerr << "Unknown change type: " << type << "\n";
-            continue;
+        if (!(ss >> type >> u >> v >> w)) {
+            cerr << "Error: Invalid change entry in " << filename << endl;
+            //continue;
+        }
+        if (u < 0 || u >= graph->V || v < 0 || v >= graph->V) {
+            cerr << "Error: Invalid vertex index in " << filename << endl;
+            //continue;
+        }
+        if (w < 0) {
+            cerr << "Error: Negative weight detected in " << filename << endl;
+            //continue;
         }
 
-        // Print updated results
-        for (int i = 0; i < graph->V; i++) {
-            cout << "Vertex " << i << ": Dist = " << (Dist[i] == LLONG_MAX ? "INF" : to_string(Dist[i]))
-                 << ", Parent = " << Parent[i] << "\n";
+        if (type == 'D' || type == 'd') {
+            graph->deleteEdge(u, v);
+            dijkstra(*graph, source, Dist, Parent);
+        } else if (type == 'I' || type == 'i') {
+            graph->addEdge(u, v, w);
+            dijkstra(*graph, source, Dist, Parent);
+        } else {
+            cerr << "Error: Unknown change type '" << type << "' in " << filename << endl;
         }
     }
 
@@ -196,22 +181,60 @@ void readChangesFromFile(const string& filename, Graph* graph, vector<long long>
 
 // Main
 int main() {
+    double start_time, end_time;
+
+    // Step 1: Read graph from file
+    start_time = omp_get_wtime();
     Graph* graph = readGraphFromFile("graph.txt");
-    if (!graph) return 1;
+    if (!graph) {
+        cerr << "Error: Could not read graph from file\n";
+        return 1;
+    }
+    end_time = omp_get_wtime();
+    cout << "Time to read graph from file: " << end_time - start_time << " seconds\n";
 
-    vector<long long> Dist;
-    vector<int> Parent;
+    // Step 2: Initialize vectors for distance and parent
+    vector<double> Dist(graph->V, numeric_limits<double>::infinity());
+    vector<int> Parent(graph->V, -1);
+    int source = 0;
 
-    dijkstra(*graph, 0, Dist, Parent);
+    // Step 3: Run Dijkstra's algorithm
+    start_time = omp_get_wtime();
+    dijkstra(*graph, source, Dist, Parent);
+    end_time = omp_get_wtime();
+    cout << "Time to run Dijkstra's algorithm: " << end_time - start_time << " seconds\n";
 
-    cout << "Initial SSSP Distances:\n";
-    for (int i = 0; i < graph->V; i++) {
-        cout << "Vertex " << i << ": Dist = " << (Dist[i] == LLONG_MAX ? "INF" : to_string(Dist[i])) 
-             << ", Parent = " << Parent[i] << "\n";
+    // Step 4: Read changes from file
+    start_time = omp_get_wtime();
+    readChangesFromFile("changes.txt", graph, Dist, Parent, source);
+    end_time = omp_get_wtime();
+    cout << "Time to read changes from file: " << end_time - start_time << " seconds\n";
+
+    // Step 5: Write output to file
+    start_time = omp_get_wtime();
+    ofstream out("output2.txt");
+    if (!out.is_open()) {
+        cerr << "Error: Could not open output.txt for writing\n";
+        delete graph;
+        return 1;
     }
 
-    readChangesFromFile("changes.txt", graph, Dist, Parent, 0);
+    out << fixed << setprecision(1);
+    out << "Vertex Distance Parent\n";
+    for (int i = 0; i < graph->V; ++i) {
+        out << i << " " << Dist[i] << " " << Parent[i] << "\n";
+    }
+    out.close();
+    end_time = omp_get_wtime();
+    cout << "Time to write output to file: " << end_time - start_time << " seconds\n";
 
+    cout << "Output written to output2.txt\n";
+
+    // Step 6: Clean up and delete graph
     delete graph;
+
     return 0;
 }
+
+// g++ serial_sssp.cpp -o s1
+// ./s1

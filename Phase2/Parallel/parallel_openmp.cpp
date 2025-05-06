@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <set>
 
 using namespace std;
 
@@ -29,7 +30,7 @@ struct SSSPTree {
 
 void ComputeInitialSSSP(const vector<vector<pair<int, double>>> &G, SSSPTree &T, int source) {
     T.dist[source] = 0;
-    T.parent[source] = source;
+    T.parent[source] = -1;
     priority_queue<pair<double, int>, vector<pair<double, int>>, greater<>> pq;
     pq.push({0, source});
 
@@ -175,31 +176,38 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>> &G, SSSPTree &T, con
 }
 
 int main() {
+    double start_time, end_time;
+
+    // Read graph file
+    start_time = omp_get_wtime();
     ifstream graph_file("graph.txt");
     if (!graph_file.is_open()) {
         cerr << "Error: Could not open graph.txt\n";
         return 1;
     }
 
-    int n;
-    if (!(graph_file >> n) || n <= 0) {
-        cerr << "Error: Invalid number of vertices in graph.txt\n";
-        return 1;
-    }
-
-    vector<vector<pair<int, double>>> G(n);
+    vector<vector<pair<int, double>>> G;
+    set<int> all_nodes;
     int u, v;
     double w;
+    
     while (graph_file >> u >> v >> w) {
-        if (u < 0 || u >= n || v < 0 || v >= n || w < 0) {
-            cerr << "Error: Invalid edge in graph.txt\n";
+        if (u < 0 || v < 0 || w < 0) {
+            cerr << "Error: Invalid edge values in graph.txt: " << u << " " << v << " " << w << "\n";
             return 1;
         }
+        all_nodes.insert(u);
+        all_nodes.insert(v);
+        G.resize(all_nodes.size());
         G[u].push_back({v, w});
         G[v].push_back({u, w});
     }
     graph_file.close();
+    end_time = omp_get_wtime();
+    cout << "Time to read graph file: " << end_time - start_time << " seconds\n";
 
+    // Read changes file
+    start_time = omp_get_wtime();
     ifstream changes_file("changes.txt");
     if (!changes_file.is_open()) {
         cerr << "Error: Could not open changes.txt\n";
@@ -219,7 +227,7 @@ int main() {
             continue;
         }
 
-        if (u < 0 || u >= n || v < 0 || v >= n || w < 0) {
+        if (u < 0 || v < 0 || w < 0) {
             cerr << "Error: Invalid edge values in changes.txt: " << line << "\n";
             continue;
         }
@@ -233,15 +241,28 @@ int main() {
         }
     }
     changes_file.close();
+    end_time = omp_get_wtime();
+    cout << "Time to read changes file: " << end_time - start_time << " seconds\n";
 
+    // Compute initial SSSP
+    start_time = omp_get_wtime();
     int source = 0;
-    int A = (n > 10000) ? n / 100 : 50;
+    int A = (G.size() > 10000) ? G.size() / 100 : 50;
 
-    SSSPTree T(n);
+    SSSPTree T(G.size());
     ComputeInitialSSSP(G, T, source);
-    AsynchronousUpdating(G, T, Del, Ins, source, A);
+    end_time = omp_get_wtime();
+    cout << "Time to compute initial SSSP: " << end_time - start_time << " seconds\n";
 
-    ofstream out("output.txt");
+    // Perform asynchronous updates
+    start_time = omp_get_wtime();
+    AsynchronousUpdating(G, T, Del, Ins, source, A);
+    end_time = omp_get_wtime();
+    cout << "Time for asynchronous updates: " << end_time - start_time << " seconds\n";
+
+    // Write output to file
+    start_time = omp_get_wtime();
+    ofstream out("output_openmp.txt");
     if (!out.is_open()) {
         cerr << "Error: Could not open output.txt\n";
         return 1;
@@ -249,15 +270,15 @@ int main() {
 
     out << fixed << setprecision(1);
     out << "Vertex Distance Parent\n";
-    for (int i = 0; i < n; ++i) {
+    for (int i = 0; i < G.size(); ++i) {
         out << i << " " << T.dist[i] << " " << T.parent[i] << "\n";
     }
     out.close();
-    cout << "Output written to output.txt\n";
+    end_time = omp_get_wtime();
+    cout << "Time to write output file: " << end_time - start_time << " seconds\n" << endl;
 
     return 0;
 }
 
-// mpicxx -o temp mpi_openmp.cpp -lmetis -fopenmp
-// mpirun -np 2 ./temp
-// time mpirun -perhost 6 -np 102 ./mpi_executable
+//  g++ -o e_omp parallel_openmp.cpp -fopenmp
+// time ./e_omp
