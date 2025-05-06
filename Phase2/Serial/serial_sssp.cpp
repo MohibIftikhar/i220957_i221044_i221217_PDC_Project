@@ -3,10 +3,9 @@
 #include <list>
 #include <queue>
 #include <climits>
-#include <functional>
 #include <fstream>
 #include <sstream>
-#include <cmath>
+#include <functional>
 
 using namespace std;
 
@@ -20,26 +19,25 @@ struct Edge {
 // Graph class using adjacency list representation
 class Graph {
 public:
-    int V; // Number of vertices
-    vector<list<Edge>> vertices; // Adjacency list
-    vector<bool> active; // Track active vertices (for node deletion)
+    int V;
+    vector<list<Edge>> vertices;
+    vector<bool> active;
 
     Graph(int vertices) : V(vertices) {
         this->vertices.resize(V);
-        this->active.assign(V, true); // All vertices are initially active
+        this->active.assign(V, true);
     }
 
     void addEdge(int from, int to, long long weight) {
-        if (from >= V || to >= V || !active[from] || !active[to]) return; // Ignore if vertices are invalid or inactive
+        if (from >= V || to >= V || !active[from] || !active[to]) return;
         vertices[from].emplace_back(to, weight);
-        vertices[to].emplace_back(from, weight); // Add reverse edge for undirected graph
+        vertices[to].emplace_back(from, weight);
     }
 
-    // Delete an edge from the graph (delete both directions for undirected behavior)
     bool deleteEdge(int from, int to) {
         if (from >= V || to >= V || !active[from] || !active[to]) return false;
         bool deleted = false;
-        // Delete (from, to)
+
         for (auto it = vertices[from].begin(); it != vertices[from].end(); ++it) {
             if (it->to == to) {
                 vertices[from].erase(it);
@@ -47,7 +45,7 @@ public:
                 break;
             }
         }
-        // Delete (to, from)
+
         for (auto it = vertices[to].begin(); it != vertices[to].end(); ++it) {
             if (it->to == from) {
                 vertices[to].erase(it);
@@ -55,20 +53,15 @@ public:
                 break;
             }
         }
+
         return deleted;
     }
 
-    // Delete a node and all its associated edges
     void deleteNode(int node) {
         if (node >= V || !active[node]) return;
-
-        // Mark the node as inactive
         active[node] = false;
-
-        // Clear all outgoing edges from this node
         vertices[node].clear();
 
-        // Remove all incoming edges to this node
         for (int u = 0; u < V; u++) {
             if (!active[u]) continue;
             for (auto it = vertices[u].begin(); it != vertices[u].end();) {
@@ -80,30 +73,9 @@ public:
             }
         }
     }
-
-    // Update the weight of an existing edge (update both directions)
-    bool updateEdgeWeight(int from, int to, long long newWeight) {
-        if (from >= V || to >= V || !active[from] || !active[to]) return false;
-        bool updated = false;
-        for (auto& edge : vertices[from]) {
-            if (edge.to == to) {
-                edge.weight = newWeight;
-                updated = true;
-                break;
-            }
-        }
-        for (auto& edge : vertices[to]) {
-            if (edge.to == from) {
-                edge.weight = newWeight;
-                updated = true;
-                break;
-            }
-        }
-        return updated;
-    }
 };
 
-// Function to read the initial graph from a file (no scaling, undirected)
+// Function to read the initial graph from a file
 Graph* readGraphFromFile(const string& filename) {
     ifstream file(filename);
     if (!file.is_open()) {
@@ -123,6 +95,7 @@ Graph* readGraphFromFile(const string& filename) {
         maxVertex = max(maxVertex, max(from, to));
         edges.emplace_back(from, to, distance);
     }
+
     file.close();
 
     int V = maxVertex + 1;
@@ -131,39 +104,37 @@ Graph* readGraphFromFile(const string& filename) {
     for (const auto& edge : edges) {
         int from = get<0>(edge);
         int to = get<1>(edge);
-        double distance = get<2>(edge);
-        long long weight = static_cast<long long>(distance); // No scaling
-        graph->addEdge(from, to, weight); // Adds both directions
+        long long weight = static_cast<long long>(get<2>(edge));
+        graph->addEdge(from, to, weight);
     }
 
     return graph;
 }
 
-// Compute initial SSSP using Dijkstra's algorithm
+// Dijkstra's algorithm
 void dijkstra(Graph& graph, int source, vector<long long>& Dist, vector<int>& Parent) {
     using PQNode = pair<long long, int>;
     priority_queue<PQNode, vector<PQNode>, greater<PQNode>> pq;
 
     Dist.assign(graph.V, LLONG_MAX);
     Parent.assign(graph.V, -1);
-    if (!graph.active[source]) return; // Source is inactive
+    if (!graph.active[source]) return;
+
     Dist[source] = 0;
     pq.emplace(0, source);
 
     while (!pq.empty()) {
-        long long d = pq.top().first;
-        int u = pq.top().second;
+        auto [d, u] = pq.top();
         pq.pop();
 
-        if (d != Dist[u]) continue;
-        if (!graph.active[u]) continue; // Skip inactive vertices
+        if (d != Dist[u] || !graph.active[u]) continue;
 
         for (const Edge& edge : graph.vertices[u]) {
             int v = edge.to;
-            if (!graph.active[v]) continue; // Skip inactive vertices
             long long weight = edge.weight;
+            if (!graph.active[v]) continue;
 
-            if (Dist[u] != LLONG_MAX && Dist[v] > Dist[u] + weight) {
+            if (Dist[v] > Dist[u] + weight) {
                 Dist[v] = Dist[u] + weight;
                 Parent[v] = u;
                 pq.emplace(Dist[v], v);
@@ -172,126 +143,13 @@ void dijkstra(Graph& graph, int source, vector<long long>& Dist, vector<int>& Pa
     }
 }
 
-// Function to find descendants of a vertex in the SSSP tree
-void findDescendants(const Graph& graph, const vector<int>& Parent, int v, vector<bool>& affected) {
-    for (int u = 0; u < graph.V; u++) {
-        if (!graph.active[u]) continue;
-        if (Parent[u] == v && !affected[u]) {
-            affected[u] = true;
-            findDescendants(graph, Parent, u, affected);
-        }
-    }
-}
-
-// Simplified UpdateSingleChange for edge deletion (handle both directions)
-void UpdateSingleChange(Graph& graph, int source, vector<long long>& Dist, vector<int>& Parent, 
+// Recompute SSSP from scratch on every update
+void UpdateSingleChange(Graph& graph, int source, vector<long long>& Dist, vector<int>& Parent,
                         int u, int v, long long W_uv, bool isDeletion = false) {
-    if (!graph.active[u] || !graph.active[v]) return;
-
-    if (isDeletion) {
-        // Check if either (u,v) or (v,u) is in the SSSP tree
-        vector<bool> affected(graph.V, false);
-        int affectedVertex = -1;
-
-        // Check (u,v)
-        if (Parent[v] == u) {
-            affectedVertex = v;
-            affected[v] = true;
-            Dist[v] = LLONG_MAX;
-            Parent[v] = -1;
-        }
-        // Check (v,u)
-        else if (Parent[u] == v) {
-            affectedVertex = u;
-            affected[u] = true;
-            Dist[u] = LLONG_MAX;
-            Parent[u] = -1;
-        }
-
-        if (affectedVertex != -1) {
-            // Mark all descendants of the affected vertex as affected
-            findDescendants(graph, Parent, affectedVertex, affected);
-            for (int i = 0; i < graph.V; i++) {
-                if (affected[i]) {
-                    Dist[i] = LLONG_MAX;
-                    Parent[i] = -1;
-                }
-            }
-        }
-
-        // Recompute shortest paths for all vertices using Dijkstra's
-        using PQNode = pair<long long, int>;
-        priority_queue<PQNode, vector<PQNode>, greater<PQNode>> pq;
-        vector<bool> visited(graph.V, false);
-
-        // Initialize the priority queue with the source
-        pq.emplace(0, source);
-        Dist[source] = 0;
-
-        while (!pq.empty()) {
-            long long d = pq.top().first;
-            int w = pq.top().second;
-            pq.pop();
-
-            if (visited[w]) continue;
-            visited[w] = true;
-            if (!graph.active[w]) continue;
-
-            for (const Edge& edge : graph.vertices[w]) {
-                int n = edge.to;
-                if (!graph.active[n]) continue;
-                if (Dist[w] != LLONG_MAX && Dist[n] > Dist[w] + edge.weight) {
-                    Dist[n] = Dist[w] + edge.weight;
-                    Parent[n] = w;
-                    pq.emplace(Dist[n], n);
-                }
-            }
-        }
-    } else {
-        // For edge insertion or weight update, use a simplified approach
-        using PQNode = pair<long long, int>;
-        priority_queue<PQNode, vector<PQNode>, greater<PQNode>> pq;
-
-        // Temporarily try the new edge (consider both directions)
-        long long newDistV = (Dist[u] != LLONG_MAX) ? Dist[u] + W_uv : LLONG_MAX;
-        if (newDistV < Dist[v]) {
-            Dist[v] = newDistV;
-            Parent[v] = u;
-        }
-        long long newDistU = (Dist[v] != LLONG_MAX) ? Dist[v] + W_uv : LLONG_MAX;
-        if (newDistU < Dist[u]) {
-            Dist[u] = newDistU;
-            Parent[u] = v;
-        }
-
-        // Recompute shortest paths starting from all vertices
-        vector<bool> visited(graph.V, false);
-        Dist[source] = 0;
-        pq.emplace(0, source);
-
-        while (!pq.empty()) {
-            long long d = pq.top().first;
-            int w = pq.top().second;
-            pq.pop();
-
-            if (visited[w]) continue;
-            visited[w] = true;
-            if (!graph.active[w]) continue;
-
-            for (const Edge& edge : graph.vertices[w]) {
-                int n = edge.to;
-                if (!graph.active[n]) continue;
-                if (Dist[w] != LLONG_MAX && Dist[n] > Dist[w] + edge.weight) {
-                    Dist[n] = Dist[w] + edge.weight;
-                    Parent[n] = w;
-                    pq.emplace(Dist[n], n);
-                }
-            }
-        }
-    }
+    dijkstra(graph, source, Dist, Parent);
 }
 
-// Function to read and apply changes from a file (no scaling)
+// Apply changes from a file
 void readChangesFromFile(const string& filename, Graph* graph, vector<long long>& Dist, vector<int>& Parent, int source) {
     ifstream file(filename);
     if (!file.is_open()) {
@@ -300,68 +158,50 @@ void readChangesFromFile(const string& filename, Graph* graph, vector<long long>
     }
 
     string line;
-    // Read number of deletions
-    getline(file, line);
-    int numDeletions = stoi(line);
+    while (getline(file, line)) {
+        if (line.empty()) continue;
 
-    // Process deletions
-    for (int i = 0; i < numDeletions; i++) {
-        getline(file, line);
         stringstream ss(line);
+        char type;
         int u, v;
         double w;
-        ss >> u >> v >> w;
-        long long weight = static_cast<long long>(w); // No scaling
+        ss >> type >> u >> v >> w;
+        long long weight = static_cast<long long>(w);
 
-        cout << "\nDeleting edge e(" << u << "," << v << ") with weight " << w << ":\n";
-        if (graph->deleteEdge(u, v)) {
-            UpdateSingleChange(*graph, source, Dist, Parent, u, v, LLONG_MAX, true);
+        if (type == 'D' || type == 'd') {
+            cout << "\nDeleting edge e(" << u << "," << v << ") with weight " << w << ":\n";
+            if (graph->deleteEdge(u, v)) {
+                UpdateSingleChange(*graph, source, Dist, Parent, u, v, LLONG_MAX, true);
+            } else {
+                cout << "Edge not found.\n";
+            }
+        } else if (type == 'I' || type == 'i') {
+            cout << "\nAdding edge e(" << u << "," << v << ") with weight " << w << ":\n";
+            graph->addEdge(u, v, weight);
+            UpdateSingleChange(*graph, source, Dist, Parent, u, v, weight, false);
         } else {
-            cout << "Edge e(" << u << "," << v << ") not found in either direction.\n";
+            cerr << "Unknown change type: " << type << "\n";
+            continue;
         }
-        for (int j = 0; j < graph->V; j++) {
-            cout << "Vertex " << j << ": Dist = " << (Dist[j] == LLONG_MAX ? "INF" : to_string(Dist[j])) 
-                 << ", Parent = " << Parent[j] << "\n";
-        }
-    }
 
-    // Read number of additions
-    getline(file, line);
-    int numAdditions = stoi(line);
-
-    // Process additions
-    for (int i = 0; i < numAdditions; i++) {
-        getline(file, line);
-        stringstream ss(line);
-        int u, v;
-        double w;
-        ss >> u >> v >> w;
-        long long weight = static_cast<long long>(w); // No scaling
-
-        cout << "\nAdding edge e(" << u << "," << v << ") with weight " << w << ":\n";
-        graph->addEdge(u, v, weight);
-        UpdateSingleChange(*graph, source, Dist, Parent, u, v, weight, false);
-        for (int j = 0; j < graph->V; j++) {
-            cout << "Vertex " << j << ": Dist = " << (Dist[j] == LLONG_MAX ? "INF" : to_string(Dist[j])) 
-                 << ", Parent = " << Parent[j] << "\n";
+        // Print updated results
+        for (int i = 0; i < graph->V; i++) {
+            cout << "Vertex " << i << ": Dist = " << (Dist[i] == LLONG_MAX ? "INF" : to_string(Dist[i]))
+                 << ", Parent = " << Parent[i] << "\n";
         }
     }
 
     file.close();
 }
 
-// Main function to test the implementation with file reading
+// Main
 int main() {
     Graph* graph = readGraphFromFile("graph.txt");
-    if (!graph) {
-        return 1; // Exit if file reading failed
-    }
+    if (!graph) return 1;
 
-    // Arrays for Dist and Parent
     vector<long long> Dist;
     vector<int> Parent;
 
-    // Compute initial SSSP from source vertex 0
     dijkstra(*graph, 0, Dist, Parent);
 
     cout << "Initial SSSP Distances:\n";
@@ -370,11 +210,8 @@ int main() {
              << ", Parent = " << Parent[i] << "\n";
     }
 
-    // Read and apply changes from changes.txt
     readChangesFromFile("changes.txt", graph, Dist, Parent, 0);
 
-    // Cleanup
     delete graph;
-
     return 0;
 }
