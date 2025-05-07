@@ -8,6 +8,7 @@
 #include <fstream>
 #include <sstream>
 #include <set>
+#include <tuple>
 
 using namespace std;
 
@@ -54,16 +55,16 @@ void ComputeInitialSSSP(const vector<vector<pair<int, double>>> &G, SSSPTree &T,
 }
 
 void RemoveEdge(vector<vector<pair<int, double>>> &G, int u, int v) {
-    G[u].erase(remove_if(G[u].begin(), G[u].end(),
-                         [v](const pair<int, double> &e) {
-                             return e.first == v;
-                         }),
-               G[u].end());
-    G[v].erase(remove_if(G[v].begin(), G[v].end(),
-                         [u](const pair<int, double> &e) {
-                             return e.first == u;
-                         }),
-               G[v].end());
+    auto remove_from_list = [](vector<pair<int, double>> &adj, int node) {
+        adj.erase(remove_if(adj.begin(), adj.end(),
+                            [node](const pair<int, double>& e) {
+                                return e.first == node;
+                            }),
+                  adj.end());
+    };
+
+    remove_from_list(G[u], v);  // Remove v from u's adjacency
+    remove_from_list(G[v], u);  // Remove u from v's adjacency
 }
 
 void ProcessCE(vector<vector<pair<int, double>>> &G, SSSPTree &T, const vector<Edge> &Del, const vector<Edge> &Ins, int source) {
@@ -175,19 +176,6 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>> &G, SSSPTree &T, con
     }
 }
 
-#include <omp.h>
-#include <iostream>
-#include <fstream>
-#include <vector>
-#include <set>
-#include <sstream>
-#include <iomanip>
-#include <limits>
-#include <string>
-using namespace std;
-
-// Assuming Edge, SSSPTree, ComputeInitialSSSP, and AsynchronousUpdating are defined elsewhere.
-
 int main(int argc, char* argv[]) {
     cout << "\n----------------- PARALLEL SSSP : OpenMP Version -----------------\n\n";
 
@@ -209,23 +197,27 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    vector<vector<pair<int, double>>> G;
-    set<int> all_nodes;
+    vector<tuple<int, int, double>> edges;
     int u, v;
     double w;
+    int max_node = -1;
 
     while (graph_file >> u >> v >> w) {
         if (u < 0 || v < 0 || w < 0) {
             cerr << "Error: Invalid edge values in " << graph_filename << ": " << u << " " << v << " " << w << "\n";
             return 1;
         }
-        all_nodes.insert(u);
-        all_nodes.insert(v);
-        G.resize(all_nodes.size());
+        max_node = max({max_node, u, v});
+        edges.emplace_back(u, v, w);
+    }
+    graph_file.close();
+
+    vector<vector<pair<int, double>>> G(max_node + 1);
+    for (const auto &[u, v, w] : edges) {
         G[u].push_back({v, w});
         G[v].push_back({u, w});
     }
-    graph_file.close();
+
     double t_read_end = omp_get_wtime();
 
     // Read changes file (optional)
@@ -332,4 +324,25 @@ int main(int argc, char* argv[]) {
 // time ./e_omp ../Datasets/bio-CE/bio-CE-HT.edges 
 // time ./e_omp ../Datasets/bio-CE/bio-CE-HT.edges ../Datasets/bio-CE/bio-CE-HT_updates_500.edges
 
-//  time ./e_omp ../Datasets/bio-h/bio-h.edges
+// time OMP_NUM_THREADS=2 ./e_omp ../Datasets/bio-h/bio-h.edges
+// time OMP_NUM_THREADS=4 ./e_omp ../Datasets/bio-h/bio-h.edges
+// time OMP_NUM_THREADS=6 ./e_omp ../Datasets/bio-h/bio-h.edges
+// time OMP_NUM_THREADS=8 ./e_omp ../Datasets/bio-h/bio-h.edges
+
+// time OMP_NUM_THREADS=2 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_10000.edges 
+// time OMP_NUM_THREADS=4 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_10000.edges 
+// time OMP_NUM_THREADS=6 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_10000.edges 
+// time OMP_NUM_THREADS=8 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_10000.edges 
+
+// time OMP_NUM_THREADS=2 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_12500.edges 
+// time OMP_NUM_THREADS=4 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_12500.edges 
+// time OMP_NUM_THREADS=6 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_12500.edges 
+// time OMP_NUM_THREADS=8 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_12500.edges 
+
+// time OMP_NUM_THREADS=2 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_15000.edges 
+// time OMP_NUM_THREADS=4 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_15000.edges 
+// time OMP_NUM_THREADS=6 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_15000.edges 
+// time OMP_NUM_THREADS=8 ./e_omp ../Datasets/bio-h/bio-h.edges ../Datasets/bio-h/bio-h_updates_15000.edges 
+
+// time ./e_omp ../Datasets/bio-CX/bio-CE-CX.edges
+// time ./e_omp ../Datasets/bio-CX/bio-CE-CX.edges ../Datasets/bio-CX/bio-CE-CX_updates_10000.edges

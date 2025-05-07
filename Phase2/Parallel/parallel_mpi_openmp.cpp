@@ -157,7 +157,7 @@ void LoadSubgraph(int rank, vector<vector<pair<int, double>>>& G, set<int>& loca
          << edge_count << " edges" << endl;
 }
 
-// Load changes from changes.txt
+// Load changes
 void LoadChanges(string filename, int rank, vector<Edge>& Del, vector<Edge>& Ins, int n) {
     if (rank != 0) return; // Only rank 0 reads the file
     ifstream change_stream(filename);
@@ -292,6 +292,8 @@ void AddEdge(vector<vector<pair<int, double>>>& G, int u, int v, double weight) 
     {
         G[u].push_back({v, weight});
         G[v].push_back({u, weight});
+        cout << "Edge added: " << u << " " << v << " " << weight << endl;
+
     }
 }
 
@@ -313,6 +315,7 @@ void RemoveEdge(vector<vector<pair<int, double>>>& G, int u, int v) {
     );
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+    cout << "Edge removed: " << u << " " << v << endl;
 }
 
 // Process edge changes
@@ -323,8 +326,10 @@ void ProcessCE(vector<vector<pair<int, double>>>& G, SSSPTree& T, const vector<E
     #pragma omp parallel for schedule(dynamic)
     for (size_t i = 0; i < Del.size(); ++i) {
         int u = Del[i].u, v = Del[i].v;
+        
         #pragma omp critical
         {
+            cout << "Processing deletion: " << u << " " << v << endl;
             RemoveEdge(G, u, v);
         }
         if (local_nodes.count(v)) {
@@ -355,6 +360,10 @@ void ProcessCE(vector<vector<pair<int, double>>>& G, SSSPTree& T, const vector<E
     for (size_t i = 0; i < Ins.size(); ++i) {
         int u = Ins[i].u, v = Ins[i].v;
         double w = Ins[i].weight;
+        #pragma omp critical
+        {
+            cout << "Processing insertion: " << u << " " << v << " " << w << endl;
+        }
         AddEdge(G, u, v, w);
         int x = (T.dist[u] < T.dist[v]) ? u : v;
         int y = (x == u) ? v : u;
@@ -381,52 +390,102 @@ void ProcessCE(vector<vector<pair<int, double>>>& G, SSSPTree& T, const vector<E
 
 // Communicate ghost node updates
 void CommunicateGhostUpdates(SSSPTree& T, const set<int>& local_nodes, const set<int>& ghost_nodes, const map<int, int>& ghost_to_owner, map<int, pair<double, int>>& ghost_updates, int rank, int num_procs) {
-    vector<vector<pair<int, pair<double, int>>>> send_buffers(num_procs);
+    using Update = pair<int, pair<double, int>>;
+
+    // Step 1: Prepare send buffers for each target rank
+    vector<vector<Update>> send_buffers(num_procs);
     for (const auto& [v, update] : ghost_updates) {
         int owner = ghost_to_owner.at(v);
-        send_buffers[owner].push_back({v, update});
+        send_buffers[owner].emplace_back(v, update);
     }
 
+    // Step 2: Prepare send and receive size arrays
+    vector<int> send_sizes(num_procs, 0);
+    vector<int> recv_sizes(num_procs, 0);
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank) {
+            send_sizes[p] = static_cast<int>(send_buffers[p].size());
+        }
+    }
+
+    // Step 3: Exchange sizes using MPI_Sendrecv
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank) {
+            MPI_Sendrecv(&send_sizes[p], 1, MPI_INT, p, 0, &recv_sizes[p], 1, MPI_INT, p, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+    }
+
+    // Step 4: Allocate receive buffers
+    vector<vector<Update>> recv_buffers(num_procs);
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank && recv_sizes[p] > 0) {
+            recv_buffers[p].resize(recv_sizes[p]);
+        }
+    }
+
+    // Step 5: Post non-blocking receives
+    vector<MPI_Request> recv_requests;
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank && recv_sizes[p] > 0) {
+            MPI_Request req;
+            MPI_Irecv(recv_buffers[p].data(),
+                      recv_sizes[p] * sizeof(Update),
+                      MPI_BYTE, p, 1, MPI_COMM_WORLD, &req);
+            recv_requests.push_back(req);
+        }
+    }
+
+    // Step 6: Post non-blocking sends
     vector<MPI_Request> send_requests;
     for (int p = 0; p < num_procs; ++p) {
-        if (p == rank || send_buffers[p].empty()) continue;
-        int count = send_buffers[p].size();
-        MPI_Request req;
-        MPI_Isend(send_buffers[p].data(), count * sizeof(pair<int, pair<double, int>>), MPI_BYTE, p, 0, MPI_COMM_WORLD, &req);
-        send_requests.push_back(req);
+        if (p != rank && send_sizes[p] > 0) {
+            MPI_Request req;
+            cout << "Rank " << rank << ": Sending data to Rank " << p << endl;
+            MPI_Isend(send_buffers[p].data(),
+                      send_sizes[p] * sizeof(Update),
+                      MPI_BYTE, p, 1, MPI_COMM_WORLD, &req);
+            send_requests.push_back(req);
+        }
     }
 
-    vector<pair<int, pair<double, int>>> recv_buffer;
-    MPI_Status status;
-    int flag;
-    do {
-        MPI_Iprobe(MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &flag, &status);
-        if (flag) {
-            int source = status.MPI_SOURCE;
-            int count;
-            MPI_Get_count(&status, MPI_BYTE, &count);
-            recv_buffer.resize(count / sizeof(pair<int, pair<double, int>>));
-            MPI_Recv(recv_buffer.data(), count, MPI_BYTE, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            for (const auto& [v, update] : recv_buffer) {
+    // Step 7: Wait for all communication to complete
+    if (!send_requests.empty()) {
+        MPI_Waitall(send_requests.size(), send_requests.data(), MPI_STATUSES_IGNORE);
+    }
+    if (!recv_requests.empty()) {
+        MPI_Waitall(recv_requests.size(), recv_requests.data(), MPI_STATUSES_IGNORE);
+    }
+
+    // Step 8: Apply received updates
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank) {
+            for (const auto& [v, update] : recv_buffers[p]) {
                 if (local_nodes.count(v) && update.first < T.dist[v]) {
                     T.dist[v] = update.first;
                     T.parent[v] = update.second;
                     T.affected[v] = true;
-                    cout << "Rank " << rank << ": Received update for vertex " << v << ": dist = " << update.first << ", parent = " << update.second << endl;
+                    cout << "Rank " << rank << ": Received update for vertex " << v
+                         << ": dist = " << update.first
+                         << ", parent = " << update.second << endl;
                 }
             }
         }
-    } while (flag);
+    }
 
-    MPI_Waitall(send_requests.size(), send_requests.data(), MPI_STATUSES_IGNORE);
+    MPI_Barrier(MPI_COMM_WORLD); // Final sync
     ghost_updates.clear();
 }
+
 
 // Asynchronous SSSP update
 void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, const vector<Edge>& Del, const vector<Edge>& Ins, int source, int A, const set<int>& local_nodes, const set<int>& ghost_nodes, const map<int, int>& ghost_to_owner, int rank, int num_procs) {
     map<int, pair<double, int>> ghost_updates;
     ProcessCE(G, T, Del, Ins, source, local_nodes, ghost_nodes, ghost_updates);
     CommunicateGhostUpdates(T, local_nodes, ghost_nodes, ghost_to_owner, ghost_updates, rank, num_procs);
+    #pragma omp critical
+    {
+        cout << "ghost updates done" << endl;
+    }
 
     // Protect source vertex
     if (local_nodes.count(source)) {
@@ -564,7 +623,6 @@ int main(int argc, char* argv[]) {
 
     int source = 0;
     int A = max(50, n / 100);
-
     SSSPTree T(n);
     start = MPI_Wtime();
     ComputeInitialSSSP(G, T, source, local_nodes, ghost_nodes, rank, num_procs, n);
@@ -607,6 +665,7 @@ int main(int argc, char* argv[]) {
     timings["LoadAndBroadcastChanges"] = (end - start) * 1000.0;
 
     start = MPI_Wtime();
+    cout << "Starting Asynchronous Updating...\n";
     AsynchronousUpdating(G, T, Del, Ins, source, A, local_nodes, ghost_nodes, ghost_to_owner, rank, num_procs);
     end = MPI_Wtime();
     timings["AsynchronousUpdating"] = (end - start) * 1000.0;
@@ -718,5 +777,26 @@ int main(int argc, char* argv[]) {
 }
 
 // mpicxx -o e_mpi_omp parallel_mpi_openmp.cpp -fopenmp
-// mpirun -np 2 ./e_mpi_omp
-// time mpirun -np 2 ./e_mpi_omp ../Datasets/bio-CE/bio-CE-HT_updates_500.edges
+
+// time mpirun -np 2 ./e_mpi_omp
+
+// time OMP_NUM_THREADS=2 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_10000.edges
+// time OMP_NUM_THREADS=4 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_10000.edges
+// time OMP_NUM_THREADS=6 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_10000.edges
+// time OMP_NUM_THREADS=8 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_10000.edges
+
+// time OMP_NUM_THREADS=2 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_12500.edges
+// time OMP_NUM_THREADS=4 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_12500.edges
+// time OMP_NUM_THREADS=6 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_12500.edges
+// time OMP_NUM_THREADS=8 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_12500.edges
+
+// time OMP_NUM_THREADS=2 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_15000.edges
+// time OMP_NUM_THREADS=4 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_15000.edges
+// time OMP_NUM_THREADS=6 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_15000.edges
+// time OMP_NUM_THREADS=8 mpirun -np 2 ./e_mpi_omp ../Datasets/bio-h/bio-h_updates_15000.edges
+
+
+
+
+
+// time mpirun -np 2 ./e_mpi_omp ../Datasets/bio-CE/bio-CE-CX_updates_10000.edges

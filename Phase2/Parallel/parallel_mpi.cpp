@@ -161,7 +161,7 @@ void LoadChanges(string filename, int rank, vector<Edge>& Del, vector<Edge>& Ins
     if (rank != 0) return; // Only rank 0 reads the file
     ifstream change_stream(filename);
     if (!change_stream.is_open()) {
-        cerr << "Rank " << rank << ": Error: Could not open changes.txt" << endl;
+        cerr << "Rank " << rank << ": Error: Could not open " << filename << endl;
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     string line;
@@ -178,19 +178,19 @@ void LoadChanges(string filename, int rank, vector<Edge>& Del, vector<Edge>& Ins
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         if (u < 0 || v < 0 || u >= n || v >= n) {
-            cerr << "Rank " << rank << ": Error: Invalid vertices (u=" << u << ", v=" << v << ") at line " << line_number << " in changes.txt" << endl;
+            cerr << "Rank " << rank << ": Error: Invalid vertices (u=" << u << ", v=" << v << ") at line " << line_number << " in " << filename << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         if (type == 'D' || type == 'd') {
             Del.emplace_back(u, v);
         } else if (type == 'I' || type == 'i') {
             if (!(iss >> w) || w < 0) {
-                cerr << "Rank " << rank << ": Error: Invalid or missing weight for insertion at line " << line_number << " in changes.txt: " << line << endl;
+                cerr << "Rank " << rank << ": Error: Invalid or missing weight for insertion at line " << line_number << " in " << filename << ": " << line << endl;
                 MPI_Abort(MPI_COMM_WORLD, 1);
             }
             Ins.emplace_back(u, v, w);
         } else {
-            cerr << "Rank " << rank << ": Error: Invalid change type '" << type << "' at line " << line_number << " in changes.txt" << endl;
+            cerr << "Rank " << rank << ": Error: Invalid change type '" << type << "' at line " << line_number << " in " << filename << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
     }
@@ -360,44 +360,90 @@ void ProcessCE(vector<vector<pair<int, double>>>& G, SSSPTree& T, const vector<E
 
 // Communicate ghost node updates
 void CommunicateGhostUpdates(SSSPTree& T, const set<int>& local_nodes, const set<int>& ghost_nodes, const map<int, int>& ghost_to_owner, map<int, pair<double, int>>& ghost_updates, int rank, int num_procs) {
-    vector<vector<pair<int, pair<double, int>>>> send_buffers(num_procs);
+    using Update = pair<int, pair<double, int>>;
+
+    // Step 1: Prepare send buffers for each target rank
+    vector<vector<Update>> send_buffers(num_procs);
     for (const auto& [v, update] : ghost_updates) {
         int owner = ghost_to_owner.at(v);
-        send_buffers[owner].push_back({v, update});
+        send_buffers[owner].emplace_back(v, update);
     }
 
+    // Step 2: Prepare send and receive size arrays
+    vector<int> send_sizes(num_procs, 0);
+    vector<int> recv_sizes(num_procs, 0);
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank) {
+            send_sizes[p] = static_cast<int>(send_buffers[p].size());
+        }
+    }
+
+    // Step 3: Exchange sizes using MPI_Sendrecv
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank) {
+            MPI_Sendrecv(&send_sizes[p], 1, MPI_INT, p, 0, &recv_sizes[p], 1, MPI_INT, p, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        }
+    }
+
+    // Step 4: Allocate receive buffers
+    vector<vector<Update>> recv_buffers(num_procs);
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank && recv_sizes[p] > 0) {
+            recv_buffers[p].resize(recv_sizes[p]);
+        }
+    }
+
+    // Step 5: Post non-blocking receives
+    vector<MPI_Request> recv_requests;
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank && recv_sizes[p] > 0) {
+            MPI_Request req;
+            MPI_Irecv(recv_buffers[p].data(),
+                      recv_sizes[p] * sizeof(Update),
+                      MPI_BYTE, p, 1, MPI_COMM_WORLD, &req);
+            recv_requests.push_back(req);
+        }
+    }
+
+    // Step 6: Post non-blocking sends
     vector<MPI_Request> send_requests;
     for (int p = 0; p < num_procs; ++p) {
-        if (p == rank || send_buffers[p].empty()) continue;
-        int count = send_buffers[p].size();
-        MPI_Request req;
-        MPI_Isend(send_buffers[p].data(), count * sizeof(pair<int, pair<double, int>>), MPI_BYTE, p, 0, MPI_COMM_WORLD, &req);
-        send_requests.push_back(req);
+        if (p != rank && send_sizes[p] > 0) {
+            MPI_Request req;
+            cout << "Rank " << rank << ": Sending data to Rank " << p << endl;
+            MPI_Isend(send_buffers[p].data(),
+                      send_sizes[p] * sizeof(Update),
+                      MPI_BYTE, p, 1, MPI_COMM_WORLD, &req);
+            send_requests.push_back(req);
+        }
     }
 
-    vector<pair<int, pair<double, int>>> recv_buffer;
-    MPI_Status status;
-    int flag;
-    do {
-        MPI_Iprobe(MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &flag, &status);
-        if (flag) {
-            int source = status.MPI_SOURCE;
-            int count;
-            MPI_Get_count(&status, MPI_BYTE, &count);
-            recv_buffer.resize(count / sizeof(pair<int, pair<double, int>>));
-            MPI_Recv(recv_buffer.data(), count, MPI_BYTE, source, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
-            for (const auto& [v, update] : recv_buffer) {
+    cout << "Rank " << rank << ": Sent " << send_buffers[rank].size() << " updates to other ranks" << endl;
+    // Step 7: Wait for all communication to complete
+    if (!send_requests.empty()) {
+        MPI_Waitall(send_requests.size(), send_requests.data(), MPI_STATUSES_IGNORE);
+    }
+    if (!recv_requests.empty()) {
+        MPI_Waitall(recv_requests.size(), recv_requests.data(), MPI_STATUSES_IGNORE);
+    }
+
+    // Step 8: Apply received updates
+    for (int p = 0; p < num_procs; ++p) {
+        if (p != rank) {
+            for (const auto& [v, update] : recv_buffers[p]) {
                 if (local_nodes.count(v) && update.first < T.dist[v]) {
                     T.dist[v] = update.first;
                     T.parent[v] = update.second;
                     T.affected[v] = true;
-                    cout << "Rank " << rank << ": Received update for vertex " << v << ": dist = " << update.first << ", parent = " << update.second << endl;
+                    cout << "Rank " << rank << ": Received update for vertex " << v
+                         << ": dist = " << update.first
+                         << ", parent = " << update.second << endl;
                 }
             }
         }
-    } while (flag);
+    }
 
-    MPI_Waitall(send_requests.size(), send_requests.data(), MPI_STATUSES_IGNORE);
+    MPI_Barrier(MPI_COMM_WORLD); // Final sync
     ghost_updates.clear();
 }
 
@@ -553,7 +599,10 @@ int main(int argc, char* argv[]) {
         if (rank != 0) Del.reserve(del_size);
         for (int i = 0; i < del_size; ++i) {
             int data[2];
-            if (rank == 0) data[0] = Del[i].u, data[1] = Del[i].v;
+            if (rank == 0) {
+                data[0] = Del[i].u;
+                data[1] = Del[i].v;
+            }
             MPI_Bcast(data, 2, MPI_INT, 0, MPI_COMM_WORLD);
             if (rank != 0) Del.emplace_back(data[0], data[1]);
         }
@@ -592,9 +641,14 @@ int main(int argc, char* argv[]) {
     vector<int> global_ghost_parent(n);
     MPI_Allreduce(local_ghost_dist.data(), global_ghost_dist.data(), n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(local_ghost_parent.data(), global_ghost_parent.data(), n, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    
     for (int v = 0; v < n; ++v) {
         T.dist[v] = global_ghost_dist[v];
-        T.parent[v] = (T.dist[v] < numeric_limits<double>::infinity()) ? global_ghost_parent[v] : -1;
+        if (T.dist[v] < numeric_limits<double>::infinity()) {
+            T.parent[v] = global_ghost_parent[v];
+        } else {
+            T.parent[v] = -1;
+        }
     }
     T.parent[source] = -1;
     double t9 = MPI_Wtime();
@@ -608,11 +662,16 @@ int main(int argc, char* argv[]) {
 
     stringstream ss;
     ss << fixed << setprecision(1);
-    for (const auto& [v, data] : local_output)
-        ss << v << " " << ((data.first == numeric_limits<double>::infinity()) ? "inf" : to_string(data.first)) << " " << data.second << "\n";
-
+    for (const auto& [v, data] : local_output) {
+        if (data.first >= numeric_limits<double>::infinity()) {
+            ss << v << " inf " << data.second << "\n";
+        } else {
+            ss << v << " " << data.first << " " << data.second << "\n";
+        }
+    }
     string local_str = ss.str();
     int local_size = local_str.size();
+
     vector<int> sizes(num_procs);
     MPI_Gather(&local_size, 1, MPI_INT, sizes.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
 
@@ -630,8 +689,28 @@ int main(int argc, char* argv[]) {
 
     // ---- Output File ----
     if (rank == 0) {
+        string all_output_str(all_output.begin(), all_output.end());
         ofstream out("output_mpi.txt");
+        if (!out.is_open()) {
+            cerr << "Error: Could not open output file." << endl;
+            MPI_Abort(MPI_COMM_WORLD, 1);
+        }
         out << "Vertex Distance Parent\n" << string(all_output.begin(), all_output.end());
+        vector<pair<int, pair<double, int>>> final_output;
+        stringstream all_ss(all_output_str);
+        string line;
+        while (getline(all_ss, line)) {
+            istringstream iss(line);
+            int v, parent;
+            string dist_str;
+            if (!(iss >> v >> dist_str >> parent)) continue;
+            double dist = (dist_str == "inf") ? numeric_limits<double>::infinity() : stod(dist_str);
+            final_output.emplace_back(v, make_pair(dist, parent));
+        }
+        sort(final_output.begin(), final_output.end());
+        for (const auto& [v, data] : final_output) {
+            out << v << " " << (data.first >= numeric_limits<double>::infinity() ? "inf" : to_string(data.first)) << " " << data.second << "\n";
+        }
         out.close();
         cout << "Output written to output_mpi.txt\n\n";
     }
@@ -658,6 +737,12 @@ int main(int argc, char* argv[]) {
 }
 
 // mpicxx -o e_mpi parallel_mpi.cpp 
+
+//time mpirun -np 2 ./e_mpi
 // time mpirun -np 2 ./e_mpi ../Datasets/bio-CE/bio-CE-HT_updates_500.edges
 
 // time mpirun -np 2 ./e_mpi ../Datasets/bio-h/bio-h_updates_10000.edges
+// time mpirun -np 2 ./e_mpi ../Datasets/bio-h/bio-h_updates_12500.edges
+// time mpirun -np 2 ./e_mpi ../Datasets/bio-h/bio-h_updates_15000.edges
+
+// time mpirun -np 2 ./e_mpi ../Datasets/bio-CX/bio-CE-CX_updates_10000.edges
