@@ -157,9 +157,9 @@ void LoadSubgraph(int rank, vector<vector<pair<int, double>>>& G, set<int>& loca
 }
 
 // Load changes from changes.txt
-void LoadChanges(int rank, vector<Edge>& Del, vector<Edge>& Ins, int n) {
+void LoadChanges(string filename, int rank, vector<Edge>& Del, vector<Edge>& Ins, int n) {
     if (rank != 0) return; // Only rank 0 reads the file
-    ifstream change_stream("changes.txt");
+    ifstream change_stream(filename);
     if (!change_stream.is_open()) {
         cerr << "Rank " << rank << ": Error: Could not open changes.txt" << endl;
         MPI_Abort(MPI_COMM_WORLD, 1);
@@ -174,7 +174,7 @@ void LoadChanges(int rank, vector<Edge>& Del, vector<Edge>& Ins, int n) {
         int u, v;
         double w = 0.0;
         if (!(iss >> type >> u >> v)) {
-            cerr << "Rank " << rank << ": Error: Malformed data at line " << line_number << " in changes.txt: " << line << endl;
+            cerr << "Rank " << rank << ": Error: Malformed data at line " << line_number << " in " << filename << ": " << line << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         if (u < 0 || v < 0 || u >= n || v >= n) {
@@ -499,220 +499,165 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
         MPI_Allreduce(&local_flag, &global_change, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
     } while (global_change);
 }
-
 int main(int argc, char* argv[]) {
-    cout << endl;
-    cout << "----------------- PARALLEL SSSP : MPI Version -----------------\n" << endl;
+    cout << "\n----------------- PARALLEL SSSP : MPI Version -----------------\n" << endl;
+
     MPI_Init(&argc, &argv);
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 
-    double start_time = MPI_Wtime();
+    double total_start = MPI_Wtime();
+
+    string changes_file = (argc >= 2) ? argv[1] : "";
 
     if (rank == 0) {
         cout << "Number of subgraphs: " << num_procs << endl;
+        if (!changes_file.empty()) {
+            cout << "Changes file: " << changes_file << endl;
+        } else {
+            cout << "No changes file provided. Running static SSSP.\n";
+        }
     }
 
+    // Containers
     vector<vector<pair<int, double>>> G;
     set<int> local_nodes, ghost_nodes;
     map<int, int> ghost_to_owner;
     int n, edge_count;
 
-    double load_start_time = MPI_Wtime();
+    // ---- Load Subgraph ----
+    double t0 = MPI_Wtime();
     LoadSubgraph(rank, G, local_nodes, ghost_nodes, ghost_to_owner, n, edge_count);
-    double load_end_time = MPI_Wtime();
-    if (rank == 0) {
-        cout << "[Time] LoadSubgraph: " << load_end_time - load_start_time << " seconds" << endl;
-    }
+    double t1 = MPI_Wtime();
 
     int total_edges = 0;
     MPI_Reduce(&edge_count, &total_edges, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-    if (rank == 0) {
-        cout << "Total number of edges across subgraphs: " << total_edges << endl;
-    }
 
+    // ---- Compute Initial SSSP ----
     int source = 0;
     int A = max(50, n / 100);
-
     SSSPTree T(n);
-
-    double compute_start_time = MPI_Wtime();
+    double t2 = MPI_Wtime();
     ComputeInitialSSSP(G, T, source, local_nodes, ghost_nodes, rank, num_procs, n);
-    double compute_end_time = MPI_Wtime();
-    if (rank == 0) {
-        cout << "[Time] ComputeInitialSSSP: " << compute_end_time - compute_start_time << " seconds" << endl;
-    }
+    double t3 = MPI_Wtime();
 
+    // ---- Load and Broadcast Changes ----
     vector<Edge> Del, Ins;
-    LoadChanges(rank, Del, Ins, n);
+    double t4 = MPI_Wtime();
+    if (!changes_file.empty()) {
+        LoadChanges(changes_file, rank, Del, Ins, n);
 
-    double load_changes_start_time = MPI_Wtime();
-    int del_size = Del.size();
-    MPI_Bcast(&del_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    if (rank != 0) {
-        Del.reserve(del_size);
-    }
-    for (int i = 0; i < del_size; ++i) {
-        int data[2];
-        if (rank == 0) {
-            data[0] = Del[i].u;
-            data[1] = Del[i].v;
+        int del_size = Del.size();
+        MPI_Bcast(&del_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (rank != 0) Del.reserve(del_size);
+        for (int i = 0; i < del_size; ++i) {
+            int data[2];
+            if (rank == 0) data[0] = Del[i].u, data[1] = Del[i].v;
+            MPI_Bcast(data, 2, MPI_INT, 0, MPI_COMM_WORLD);
+            if (rank != 0) Del.emplace_back(data[0], data[1]);
         }
-        MPI_Bcast(data, 2, MPI_INT, 0, MPI_COMM_WORLD);
-        if (rank != 0) {
-            Del.emplace_back(data[0], data[1]);
-        }
-    }
-    int ins_size = Ins.size();
-    MPI_Bcast(&ins_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    if (rank != 0) {
-        Ins.reserve(ins_size);
-    }
-    for (int i = 0; i < ins_size; ++i) {
-        int data[3];
-        if (rank == 0) {
-            data[0] = Ins[i].u;
-            data[1] = Ins[i].v;
-            data[2] = static_cast<int>(Ins[i].weight * 1000);
-        }
-        MPI_Bcast(data, 3, MPI_INT, 0, MPI_COMM_WORLD);
-        if (rank != 0) {
-            Ins.emplace_back(data[0], data[1], data[2] / 1000.0);
-        }
-    }
-    double load_changes_end_time = MPI_Wtime();
-    if (rank == 0) {
-        cout << "[Time] Load & Broadcast Changes: " << load_changes_end_time - load_changes_start_time << " seconds" << endl;
-    }
 
-    double async_update_start_time = MPI_Wtime();
+        int ins_size = Ins.size();
+        MPI_Bcast(&ins_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (rank != 0) Ins.reserve(ins_size);
+        for (int i = 0; i < ins_size; ++i) {
+            int data[3];
+            if (rank == 0) {
+                data[0] = Ins[i].u;
+                data[1] = Ins[i].v;
+                data[2] = static_cast<int>(Ins[i].weight * 1000);
+            }
+            MPI_Bcast(data, 3, MPI_INT, 0, MPI_COMM_WORLD);
+            if (rank != 0)
+                Ins.emplace_back(data[0], data[1], data[2] / 1000.0);
+        }
+    }
+    double t5 = MPI_Wtime();
+
+    // ---- Asynchronous Update ----
+    double t6 = MPI_Wtime();
     AsynchronousUpdating(G, T, Del, Ins, source, A, local_nodes, ghost_nodes, ghost_to_owner, rank, num_procs);
-    double async_update_end_time = MPI_Wtime();
-    if (rank == 0) {
-        cout << "[Time] AsynchronousUpdating: " << async_update_end_time - async_update_start_time << " seconds" << endl;
-    }
+    double t7 = MPI_Wtime();
 
-    double ghost_reconcile_start_time = MPI_Wtime();
+    // ---- Ghost Reconciliation ----
+    double t8 = MPI_Wtime();
     vector<double> local_ghost_dist(n, numeric_limits<double>::infinity());
     vector<int> local_ghost_parent(n, -1);
     for (int v : local_nodes) {
         local_ghost_dist[v] = T.dist[v];
         local_ghost_parent[v] = T.parent[v];
     }
-
     vector<double> global_ghost_dist(n);
     vector<int> global_ghost_parent(n);
     MPI_Allreduce(local_ghost_dist.data(), global_ghost_dist.data(), n, MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
     MPI_Allreduce(local_ghost_parent.data(), global_ghost_parent.data(), n, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
-
     for (int v = 0; v < n; ++v) {
         T.dist[v] = global_ghost_dist[v];
-        if (T.dist[v] < numeric_limits<double>::infinity()) {
-            T.parent[v] = global_ghost_parent[v];
-        } else {
-            T.parent[v] = -1;
-        }
+        T.parent[v] = (T.dist[v] < numeric_limits<double>::infinity()) ? global_ghost_parent[v] : -1;
     }
     T.parent[source] = -1;
-    double ghost_reconcile_end_time = MPI_Wtime();
-    if (rank == 0) {
-        cout << "[Time] Ghost Reconciliation: " << ghost_reconcile_end_time - ghost_reconcile_start_time << " seconds" << endl;
-    }
+    double t9 = MPI_Wtime();
 
-    double output_gather_start_time = MPI_Wtime();
+    // ---- Gather and Write Output ----
+    double t10 = MPI_Wtime();
     vector<pair<int, pair<double, int>>> local_output;
-    for (int v : local_nodes) {
+    for (int v : local_nodes)
         local_output.emplace_back(v, make_pair(T.dist[v], T.parent[v]));
-    }
     sort(local_output.begin(), local_output.end());
 
     stringstream ss;
     ss << fixed << setprecision(1);
-    for (const auto& [v, data] : local_output) {
-        if (data.first >= numeric_limits<double>::infinity()) {
-            ss << v << " inf " << data.second << "\n";
-        } else {
-            ss << v << " " << data.first << " " << data.second << "\n";
-        }
-    }
-    string local_output_str = ss.str();
-    int local_size = local_output_str.size();
+    for (const auto& [v, data] : local_output)
+        ss << v << " " << ((data.first == numeric_limits<double>::infinity()) ? "inf" : to_string(data.first)) << " " << data.second << "\n";
 
-    vector<int> output_sizes(num_procs);
-    MPI_Gather(&local_size, 1, MPI_INT, output_sizes.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
+    string local_str = ss.str();
+    int local_size = local_str.size();
+    vector<int> sizes(num_procs);
+    MPI_Gather(&local_size, 1, MPI_INT, sizes.data(), 1, MPI_INT, 0, MPI_COMM_WORLD);
 
-    vector<int> displacements(num_procs, 0);
+    vector<int> displs(num_procs, 0);
     int total_size = 0;
     if (rank == 0) {
-        total_size = output_sizes[0];
-        for (int i = 1; i < num_procs; ++i) {
-            displacements[i] = total_size;
-            total_size += output_sizes[i];
-        }
+        for (int i = 1; i < num_procs; ++i)
+            displs[i] = displs[i - 1] + sizes[i - 1];
+        total_size = displs[num_procs - 1] + sizes[num_procs - 1];
     }
 
     vector<char> all_output(total_size);
-    MPI_Gatherv(local_output_str.data(), local_size, MPI_CHAR, all_output.data(), output_sizes.data(), displacements.data(), MPI_CHAR, 0, MPI_COMM_WORLD);
-    double output_gather_end_time = MPI_Wtime();
-    if (rank == 0) {
-        cout << "[Time] Output Gathering: " << output_gather_end_time - output_gather_start_time << " seconds" << endl;
-    }
+    MPI_Gatherv(local_str.data(), local_size, MPI_CHAR, all_output.data(), sizes.data(), displs.data(), MPI_CHAR, 0, MPI_COMM_WORLD);
+    double t11 = MPI_Wtime();
 
+    // ---- Output File ----
     if (rank == 0) {
-        string all_output_str(all_output.begin(), all_output.end());
         ofstream out("output_mpi.txt");
-        if (!out.is_open()) {
-            cerr << "Rank 0: Error: Could not open output_mpi.txt" << endl;
-            MPI_Abort(MPI_COMM_WORLD, 1);
-        }
-        out << "Vertex Distance Parent\n";
-        vector<pair<int, pair<double, int>>> final_output;
-        stringstream all_ss(all_output_str);
-        string line;
-        while (getline(all_ss, line)) {
-            istringstream iss(line);
-            int v;
-            string dist_str;
-            int parent;
-            if (!(iss >> v >> dist_str >> parent)) {
-                cerr << "Rank 0: Error: Failed to parse output line: " << line << endl;
-                continue;
-            }
-            double dist;
-            if (dist_str == "inf") {
-                dist = numeric_limits<double>::infinity();
-            } else {
-                try {
-                    dist = stod(dist_str);
-                } catch (...) {
-                    cerr << "Rank 0: Error: Invalid distance in line: " << line << endl;
-                    continue;
-                }
-            }
-            final_output.emplace_back(v, make_pair(dist, parent));
-        }
-        sort(final_output.begin(), final_output.end());
-        for (const auto& [v, data] : final_output) {
-            if (data.first >= numeric_limits<double>::infinity()) {
-                out << v << " inf " << data.second << "\n";
-            } else {
-                out << v << " " << fixed << setprecision(1) << data.first << " " << data.second << "\n";
-            }
-        }
+        out << "Vertex Distance Parent\n" << string(all_output.begin(), all_output.end());
         out.close();
-        cout << "Output written to output_mpi.txt" << endl;
+        cout << "Output written to output_mpi.txt\n\n";
     }
 
-    double total_end_time = MPI_Wtime();
+    double total_end = MPI_Wtime();
+
+    // ---- Timing Report ----
     if (rank == 0) {
-        cout << "[Total Time] Entire Execution: " << total_end_time - start_time << " seconds" << endl;
+        cout << "----------------- PERFORMANCE REPORT -----------------\n";
+        cout << fixed << setprecision(2);
+        cout << "[Time] LoadSubgraph          : " << (t1 - t0) * 1000 << " ms\n";
+        cout << "[Time] Initial SSSP          : " << (t3 - t2) * 1000 << " ms\n";
+        if (!changes_file.empty())
+            cout << "[Time] Load/Broadcast Changes: " << (t5 - t4) * 1000 << " ms\n";
+        cout << "[Time] Asynchronous Update   : " << (t7 - t6) * 1000 << " ms\n";
+        cout << "[Time] Ghost Reconciliation  : " << (t9 - t8) * 1000 << " ms\n";
+        cout << "[Time] Output Gathering      : " << (t11 - t10) * 1000 << " ms\n";
+        cout << "[Total Time] Entire Execution: " << (total_end - total_start) * 1000 << " ms\n";
+        cout << "------------------------------------------------------\n";
     }
 
     MPI_Finalize();
     return 0;
 }
 
-
 // mpicxx -o e_mpi parallel_mpi.cpp 
-// time mpirun -np 2 ./e_mpi
+// time mpirun -np 2 ./e_mpi ../Datasets/bio-CE/bio-CE-HT_updates_500.edges
+
+// time mpirun -np 2 ./e_mpi ../Datasets/bio-h/bio-h_updates_10000.edges
