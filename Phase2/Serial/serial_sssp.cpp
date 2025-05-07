@@ -136,7 +136,6 @@ void dijkstra(Graph& graph, int source, vector<double>& Dist, vector<int>& Paren
     }
 }
 
-// Apply changes from a file
 void readChangesFromFile(const string& filename, Graph* graph, vector<double>& Dist, vector<int>& Parent, int source) {
     ifstream file(filename);
     if (!file.is_open()) {
@@ -152,23 +151,33 @@ void readChangesFromFile(const string& filename, Graph* graph, vector<double>& D
         char type;
         int u, v;
         double w;
-        if (!(ss >> type >> u >> v >> w)) {
-            cerr << "Error: Invalid change entry in " << filename << endl;
-            //continue;
-        }
-        if (u < 0 || u >= graph->V || v < 0 || v >= graph->V) {
-            cerr << "Error: Invalid vertex index in " << filename << endl;
-            //continue;
-        }
-        if (w < 0) {
-            cerr << "Error: Negative weight detected in " << filename << endl;
-            //continue;
-        }
+
+        ss >> type;
 
         if (type == 'D' || type == 'd') {
+            if (!(ss >> u >> v)) {
+                cerr << "Error: Invalid delete entry in " << filename << endl;
+                continue;
+            }
+            if (u < 0 || u >= graph->V || v < 0 || v >= graph->V) {
+                cerr << "Error: Invalid vertex index in delete entry\n";
+                continue;
+            }
             graph->deleteEdge(u, v);
             dijkstra(*graph, source, Dist, Parent);
         } else if (type == 'I' || type == 'i') {
+            if (!(ss >> u >> v >> w)) {
+                cerr << "Error: Invalid insert entry in " << filename << endl;
+                continue;
+            }
+            if (u < 0 || u >= graph->V || v < 0 || v >= graph->V) {
+                cerr << "Error: Invalid vertex index in insert entry\n";
+                continue;
+            }
+            if (w < 0) {
+                cerr << "Error: Negative weight detected in insert entry\n";
+                continue;
+            }
             graph->addEdge(u, v, w);
             dijkstra(*graph, source, Dist, Parent);
         } else {
@@ -180,44 +189,46 @@ void readChangesFromFile(const string& filename, Graph* graph, vector<double>& D
 }
 
 // Main
-int main() {
+int main(int argc, char* argv[]) {
+    cout << "\n----------------- SERIAL SSSP -----------------\n\n";
 
-    cout << endl;
-    cout << "----------------- SERIAL SSSP -----------------\n" << endl;
-    double start_time, end_time;
-
-    // Step 1: Read graph from file
-    start_time = omp_get_wtime();
-    Graph* graph = readGraphFromFile("graph.txt");
-    if (!graph) {
-        cerr << "Error: Could not read graph from file\n";
+    if (argc < 2 || argc > 3) {
+        cerr << "Usage: " << argv[0] << " <graph_file> [changes_file]\n";
         return 1;
     }
-    end_time = omp_get_wtime();
-    cout << "Time to read graph from file: " << end_time - start_time << " seconds\n";
 
-    // Step 2: Initialize vectors for distance and parent
+    string graph_filename = argv[1];
+    string changes_filename = (argc == 3) ? argv[2] : "";
+
+    double t_total_start = omp_get_wtime();
+
+    double t_read_start = omp_get_wtime();
+    Graph* graph = readGraphFromFile(graph_filename);
+    if (!graph) {
+        cerr << "Error: Could not read graph from file: " << graph_filename << "\n";
+        return 1;
+    }
+    double t_read_end = omp_get_wtime();
+
+    int source = 0;
     vector<double> Dist(graph->V, numeric_limits<double>::infinity());
     vector<int> Parent(graph->V, -1);
-    int source = 0;
 
-    // Step 3: Run Dijkstra's algorithm
-    start_time = omp_get_wtime();
+    double t_dijkstra_start = omp_get_wtime();
     dijkstra(*graph, source, Dist, Parent);
-    end_time = omp_get_wtime();
-    cout << "Time to run Dijkstra's algorithm: " << end_time - start_time << " seconds\n";
+    double t_dijkstra_end = omp_get_wtime();
 
-    // Step 4: Read changes from file
-    start_time = omp_get_wtime();
-    readChangesFromFile("changes.txt", graph, Dist, Parent, source);
-    end_time = omp_get_wtime();
-    cout << "Time to read changes from file: " << end_time - start_time << " seconds\n";
+    double t_changes_start = 0.0, t_changes_end = 0.0;
+    if (!changes_filename.empty()) {
+        t_changes_start = omp_get_wtime();
+        readChangesFromFile(changes_filename, graph, Dist, Parent, source);
+        t_changes_end = omp_get_wtime();
+    }
 
-    // Step 5: Write output to file
-    start_time = omp_get_wtime();
-    ofstream out("output2.txt");
+    double t_write_start = omp_get_wtime();
+    ofstream out("output_serial.txt");
     if (!out.is_open()) {
-        cerr << "Error: Could not open output.txt for writing\n";
+        cerr << "Error: Could not open output_serial.txt for writing\n";
         delete graph;
         return 1;
     }
@@ -228,16 +239,38 @@ int main() {
         out << i << " " << Dist[i] << " " << Parent[i] << "\n";
     }
     out.close();
-    end_time = omp_get_wtime();
-    cout << "Time to write output to file: " << end_time - start_time << " seconds\n";
+    double t_write_end = omp_get_wtime();
 
-    cout << "Output written to output2.txt\n";
+    double t_total_end = omp_get_wtime();
 
-    // Step 6: Clean up and delete graph
+    // Convert to milliseconds
+    auto ms = [](double start, double end) {
+        return static_cast<int>((end - start) * 1000.0);
+    };
+
+    // Output performance summary
+    cout << "\n=== Performance Summary ===\n";
+    cout << "Total Vertices       : " << graph->V << "\n";
+    cout << "Source Vertex        : " << source << "\n";
+    cout << "\n--- Timing (ms) ---\n";
+    cout << "Graph Read           : " << ms(t_read_start, t_read_end) << " ms\n";
+    cout << "Dijkstra's Algorithm : " << ms(t_dijkstra_start, t_dijkstra_end) << " ms\n";
+    if (!changes_filename.empty()) {
+        cout << "Apply Changes        : " << ms(t_changes_start, t_changes_end) << " ms\n";
+    } else {
+        cout << "Apply Changes        : skipped\n";
+    }
+    cout << "Write Output         : " << ms(t_write_start, t_write_end) << " ms\n";
+    cout << "Total Time           : " << ms(t_total_start, t_total_end) << " ms\n";
+    cout << "============================\n";
+    cout << "Output written to output_serial.txt\n\n";
+
     delete graph;
-
     return 0;
 }
 
-// g++ serial_sssp.cpp -o s1
-// ./s1
+// g++ serial_sssp.cpp -o s1 -fopenmp
+// time ./s1 ../Datasets/bio-CE/bio-CE-HT.edges
+// time ./s1 ../Datasets/bio-CE/bio-CE-HT.edges ../Datasets/bio-CE/bio-CE-HT_updates_500.edges
+
+// time ./s1 ../Datasets/bio-h/bio-h.edges
