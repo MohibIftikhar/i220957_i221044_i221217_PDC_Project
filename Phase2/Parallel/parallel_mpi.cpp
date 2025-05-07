@@ -18,7 +18,7 @@ struct Edge {
     int u, v;
     double weight;
     Edge() : u(0), v(0), weight(0.0) {}
-    Edge(int _u, int _v, double _w) : u(_u), v(_v), weight(_w) {}
+    Edge(int _u, int _v, double _w = 0.0) : u(_u), v(_v), weight(_w) {}
 };
 
 // Structure to represent the SSSP tree
@@ -88,7 +88,7 @@ void LoadSubgraph(int rank, vector<vector<pair<int, double>>>& G, set<int>& loca
             cerr << "Rank " << rank << ": Error: Malformed data at line " << line_number << " in " << edge_file << ": " << line << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        if (u < 0 || v < 0 || w < 0 /*|| u >= n || v >= n*/) {
+        if (u < 0 || v < 0 || w < 0) {
             cerr << "Rank " << rank << ": Error: Invalid data (u=" << u << ", v=" << v << ", w=" << w << ") at line " << line_number << " in " << edge_file << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
@@ -121,7 +121,7 @@ void LoadSubgraph(int rank, vector<vector<pair<int, double>>>& G, set<int>& loca
             cerr << "Rank " << rank << ": Error: Malformed node data at line " << line_number << " in " << node_file << ": " << line << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        if (node < 0 /*|| node >= n*/) {
+        if (node < 0) {
             cerr << "Rank " << rank << ": Error: Invalid node " << node << " at line " << line_number << " in " << node_file << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
@@ -154,14 +154,6 @@ void LoadSubgraph(int rank, vector<vector<pair<int, double>>>& G, set<int>& loca
     cout << "Rank " << rank << ": Loaded subgraph with " << n << " vertices, "
          << local_nodes.size() << " local nodes, " << ghost_nodes.size() << " ghost nodes, "
          << edge_count << " edges" << endl;
-    // cout << "Rank " << rank << ": Edges:" << endl;
-    // for (int u = 0; u < n; ++u) {
-    //     for (const auto& [v, w] : G[u]) {
-    //         if (u < v) {
-    //             cout << "  " << u << " -- " << v << " weight " << w << endl;
-    //         }
-    //     }
-    // }
 }
 
 // Load changes from changes.txt
@@ -180,18 +172,22 @@ void LoadChanges(int rank, vector<Edge>& Del, vector<Edge>& Ins, int n) {
         istringstream iss(line);
         char type;
         int u, v;
-        double w;
-        if (!(iss >> type >> u >> v >> w)) {
+        double w = 0.0;
+        if (!(iss >> type >> u >> v)) {
             cerr << "Rank " << rank << ": Error: Malformed data at line " << line_number << " in changes.txt: " << line << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        if (u < 0 || v < 0 || u >= n || v >= n || w < 0) {
-            cerr << "Rank " << rank << ": Error: Invalid data (type=" << type << ", u=" << u << ", v=" << v << ", w=" << w << ") at line " << line_number << " in changes.txt" << endl;
+        if (u < 0 || v < 0 || u >= n || v >= n) {
+            cerr << "Rank " << rank << ": Error: Invalid vertices (u=" << u << ", v=" << v << ") at line " << line_number << " in changes.txt" << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
-        if (type == 'D') {
-            Del.emplace_back(u, v, w);
-        } else if (type == 'I') {
+        if (type == 'D' || type == 'd') {
+            Del.emplace_back(u, v);
+        } else if (type == 'I' || type == 'i') {
+            if (!(iss >> w) || w < 0) {
+                cerr << "Rank " << rank << ": Error: Invalid or missing weight for insertion at line " << line_number << " in changes.txt: " << line << endl;
+                MPI_Abort(MPI_COMM_WORLD, 1);
+            }
             Ins.emplace_back(u, v, w);
         } else {
             cerr << "Rank " << rank << ": Error: Invalid change type '" << type << "' at line " << line_number << " in changes.txt" << endl;
@@ -232,22 +228,9 @@ void ComputeInitialSSSP(const vector<vector<pair<int, double>>>& G, SSSPTree& T,
         }
     }
 
-    // cout << "Rank " << rank << " after Dijkstra:" << endl;
-    // for (int v : local_nodes) {
-    //     cout << "Vertex " << v << ": Dist = " << T.dist[v] << ", Parent = " << T.parent[v] << endl;
-    // }
-
     vector<double> global_dist(T.dist.size());
     MPI_Allreduce(T.dist.data(), global_dist.data(), T.dist.size(), MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
     T.dist = global_dist;
-
-    // cout << "Rank " << rank << " after first sync:" << endl;
-    // for (int v : local_nodes) {
-    //     cout << "Vertex " << v << ": Dist = " << T.dist[v] << ", Parent = " << T.parent[v] << endl;
-    // }
-    // for (int v : ghost_nodes) {
-    //     cout << "Ghost Vertex " << v << ": Dist = " << T.dist[v] << endl;
-    // }
 
     bool changed;
     for (int iter = 0; iter < num_procs; ++iter) {
@@ -270,11 +253,6 @@ void ComputeInitialSSSP(const vector<vector<pair<int, double>>>& G, SSSPTree& T,
         }
         MPI_Allreduce(T.dist.data(), global_dist.data(), T.dist.size(), MPI_DOUBLE, MPI_MIN, MPI_COMM_WORLD);
         T.dist = global_dist;
-
-        // cout << "Rank " << rank << " after iteration " << iter << ":" << endl;
-        // for (int v : local_nodes) {
-        //     cout << "Vertex " << v << ": Dist = " << T.dist[v] << ", Parent = " << T.parent[v] << endl;
-        // }
 
         int global_changed;
         MPI_Allreduce(&changed, &global_changed, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
@@ -303,47 +281,34 @@ void ComputeInitialSSSP(const vector<vector<pair<int, double>>>& G, SSSPTree& T,
         }
     }
     T.parent[source] = -1;
-
-    // cout << "Rank " << rank << " after parent sync:" << endl;
-    // for (int v : local_nodes) {
-    //     cout << "Vertex " << v << ": Dist = " << T.dist[v] << ", Parent = " << T.parent[v] << endl;
-    // }
-    // for (int v : ghost_nodes) {
-    //     cout << "Ghost Vertex " << v << ": Dist = " << T.dist[v] << ", Parent = " << T.parent[v] << endl;
-    // }
 }
 
 // Add an edge to the graph
 void AddEdge(vector<vector<pair<int, double>>>& G, int u, int v, double weight) {
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    // #pragma omp critical
-    // {
-        G[u].push_back({v, weight});
-        G[v].push_back({u, weight});
-        //cout << "Rank " << rank << ": Added edge " << u << " -- " << v << " weight " << weight << endl;
-    //}
+    G[u].push_back({v, weight});
+    G[v].push_back({u, weight});
 }
 
 // Remove an edge from the graph
-void RemoveEdge(vector<vector<pair<int, double>>>& G, int u, int v, double weight) {
+void RemoveEdge(vector<vector<pair<int, double>>>& G, int u, int v) {
     G[u].erase(
         remove_if(G[u].begin(), G[u].end(),
-            [v, weight](const pair<int, double>& e) {
-                return e.first == v && abs(e.second - weight) < 1e-9;
+            [v](const pair<int, double>& e) {
+                return e.first == v;
             }),
         G[u].end()
     );
     G[v].erase(
         remove_if(G[v].begin(), G[v].end(),
-            [u, weight](const pair<int, double>& e) {
-                return e.first == u && abs(e.second - weight) < 1e-9;
+            [u](const pair<int, double>& e) {
+                return e.first == u;
             }),
         G[v].end()
     );
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-    //cout << "Rank " << rank << ": Removed edge " << u << " -- " << v << " weight " << weight << endl;
 }
 
 // Process edge changes
@@ -351,13 +316,9 @@ void ProcessCE(vector<vector<pair<int, double>>>& G, SSSPTree& T, const vector<E
     int rank;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    //#pragma omp parallel for schedule(dynamic)
     for (size_t i = 0; i < Del.size(); ++i) {
         int u = Del[i].u, v = Del[i].v;
-        // #pragma omp critical
-        // {
-            RemoveEdge(G, u, v, Del[i].weight);
-        //}
+        RemoveEdge(G, u, v);
         if (local_nodes.count(v)) {
             T.dist[v] = numeric_limits<double>::infinity();
             T.parent[v] = -1;
@@ -370,21 +331,12 @@ void ProcessCE(vector<vector<pair<int, double>>>& G, SSSPTree& T, const vector<E
             T.affected[u] = true;
         }
         if (ghost_nodes.count(v)) {
-            // #pragma omp critical
-            // {
-                ghost_updates[v] = {numeric_limits<double>::infinity(), -1};
-                //cout << "Rank " << rank << ": Updated ghost vertex " << v << " to dist = inf, parent = -1" << endl;
-            //}
+            ghost_updates[v] = {numeric_limits<double>::infinity(), -1};
         } else if (ghost_nodes.count(u)) {
-            // #pragma omp critical
-            // {
-                ghost_updates[u] = {numeric_limits<double>::infinity(), -1};
-                //cout << "Rank " << rank << ": Updated ghost vertex " << u << " to dist = inf, parent = -1" << endl;
-            //}
+            ghost_updates[u] = {numeric_limits<double>::infinity(), -1};
         }
     }
 
-    //#pragma omp parallel for schedule(dynamic)
     for (size_t i = 0; i < Ins.size(); ++i) {
         int u = Ins[i].u, v = Ins[i].v;
         double w = Ins[i].weight;
@@ -393,23 +345,15 @@ void ProcessCE(vector<vector<pair<int, double>>>& G, SSSPTree& T, const vector<E
         int y = (x == u) ? v : u;
         double new_dist = T.dist[x] + w;
         if (local_nodes.count(y)) {
-            // #pragma omp critical
-            // {
-                if (new_dist < T.dist[y] && T.dist[x] < numeric_limits<double>::infinity()) {
-                    T.dist[y] = new_dist;
-                    T.parent[y] = x;
-                    T.affected[y] = true;
-                    //cout << "Rank " << rank << ": Updated local vertex " << y << " to dist = " << new_dist << ", parent = " << x << endl;
-                }
-            //}
+            if (new_dist < T.dist[y] && T.dist[x] < numeric_limits<double>::infinity()) {
+                T.dist[y] = new_dist;
+                T.parent[y] = x;
+                T.affected[y] = true;
+            }
         } else if (ghost_nodes.count(y)) {
-            // #pragma omp critical
-            // {
-                if (new_dist < T.dist[y] && T.dist[x] < numeric_limits<double>::infinity()) {
-                    ghost_updates[y] = {new_dist, x};
-                    //cout << "Rank " << rank << ": Updated ghost vertex " << y << " to dist = " << new_dist << ", parent = " << x << endl;
-                }
-            //}
+            if (new_dist < T.dist[y] && T.dist[x] < numeric_limits<double>::infinity()) {
+                ghost_updates[y] = {new_dist, x};
+            }
         }
     }
 }
@@ -469,13 +413,11 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
         T.parent[source] = -1;
         T.affected_del[source] = false;
         T.affected[source] = true;
-        //cout << "Rank " << rank << ": Protected source vertex " << source << ": dist = 0, parent = -1" << endl;
     }
 
     // Reset distances for vertices directly affected by deletions
     for (int v = 0; v < G.size(); ++v) {
         if (!local_nodes.count(v) || !T.affected_del[v] || v == source) continue;
-        //cout << "Rank " << rank << ": Processing affected vertex " << v << endl;
         queue<int> Q;
         Q.push(v);
         set<int> visited;
@@ -483,7 +425,6 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
         T.dist[v] = numeric_limits<double>::infinity();
         T.parent[v] = -1;
         T.affected[v] = true;
-        //cout << "Rank " << rank << ": Reset vertex " << v << " to dist = inf, parent = -1" << endl;
 
         // Only reset vertices that were dependent on the deleted edge
         int level = 0;
@@ -493,16 +434,11 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
             for (const auto& [c, w] : G[x]) {
                 if (local_nodes.count(c) && visited.find(c) == visited.end() && c != source) {
                     bool dependent = false;
-                    //cout << "Checking neighbor " << c << " of " << x << endl;
                     for (const auto& del_edge : Del) {
-                        //cout << "  Checking against deleted edge " << del_edge.u << " -- " << del_edge.v << endl;
-                        //cout << "  Current edge: " << x << " -- " << c << endl;
-                        if ((del_edge.u == x || del_edge.v == c) || (del_edge.u == c || del_edge.v == x)) {
+                        if ((del_edge.u == x && del_edge.v == c) || (del_edge.u == c && del_edge.v == x)) {
                             dependent = true;
-                            //cout << "Dependency found on deleted edge " << c << " -- " << x << endl;
                             break;
                         }
-                        //cout << "  Deleted edge: " << del_edge.u << " -- " << del_edge.v << endl;
                     }
                     if (dependent) {
                         T.dist[c] = numeric_limits<double>::infinity();
@@ -511,7 +447,6 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
                         T.affected_del[c] = true;
                         Q.push(c);
                         visited.insert(c);
-                        //cout << "Rank " << rank << ": Reset vertex " << c << " to dist = inf, parent = -1" << endl;
                     }
                 }
             }
@@ -530,35 +465,28 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
             if (!local_nodes.count(v) || !to_process[v] || v == source) continue;
             T.affected[v] = false;
 
-            //#pragma omp parallel for schedule(dynamic)
             for (size_t i = 0; i < G[v].size(); ++i) {
                 int n = G[v][i].first;
                 double w = G[v][i].second;
                 bool updated = false;
 
-                // #pragma omp critical
-                // {
-                    if (T.dist[n] < numeric_limits<double>::infinity() && T.dist[v] > T.dist[n] + w) {
-                        T.dist[v] = T.dist[n] + w;
-                        T.parent[v] = n;
-                        T.affected[v] = true;
+                if (T.dist[n] < numeric_limits<double>::infinity() && T.dist[v] > T.dist[n] + w) {
+                    T.dist[v] = T.dist[n] + w;
+                    T.parent[v] = n;
+                    T.affected[v] = true;
+                    updated = true;
+                }
+                if (T.dist[v] < numeric_limits<double>::infinity() && T.dist[n] > T.dist[v] + w) {
+                    if (local_nodes.count(n)) {
+                        T.dist[n] = T.dist[v] + w;
+                        T.parent[n] = v;
+                        T.affected[n] = true;
                         updated = true;
-                        //cout << "Rank " << rank << ": Updated vertex " << v << " to dist = " << T.dist[v] << ", parent = " << n << endl;
+                    } else if (ghost_nodes.count(n)) {
+                        ghost_updates[n] = {T.dist[v] + w, v};
+                        updated = true;
                     }
-                    if (T.dist[v] < numeric_limits<double>::infinity() && T.dist[n] > T.dist[v] + w) {
-                        if (local_nodes.count(n)) {
-                            T.dist[n] = T.dist[v] + w;
-                            T.parent[n] = v;
-                            T.affected[n] = true;
-                            updated = true;
-                            //cout << "Rank " << rank << ": Updated vertex " << n << " to dist = " << T.dist[n] << ", parent = " << v << endl;
-                        } else if (ghost_nodes.count(n)) {
-                            ghost_updates[n] = {T.dist[v] + w, v};
-                            updated = true;
-                            //cout << "Rank " << rank << ": Updated ghost vertex " << n << " to dist = " << T.dist[v] + w << ", parent = " << v << endl;
-                        }
-                    }
-                //}
+                }
                 if (updated) {
                     local_change = true;
                 }
@@ -570,16 +498,6 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
         int local_flag = local_change ? 1 : 0;
         MPI_Allreduce(&local_flag, &global_change, 1, MPI_INT, MPI_LOR, MPI_COMM_WORLD);
     } while (global_change);
-
-    // Log updated edges
-    // cout << "Rank " << rank << ": Updated edges after changes:" << endl;
-    // for (int u = 0; u < G.size(); ++u) {
-    //     for (const auto& [v, w] : G[u]) {
-    //         if (u < v) {
-    //             cout << "  " << u << " -- " << v << " weight " << w << endl;
-    //         }
-    //     }
-    // }
 }
 
 int main(int argc, char* argv[]) {
@@ -590,7 +508,7 @@ int main(int argc, char* argv[]) {
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &num_procs);
 
-    double start_time = MPI_Wtime(); // Start time for the whole program
+    double start_time = MPI_Wtime();
 
     if (rank == 0) {
         cout << "Number of subgraphs: " << num_procs << endl;
@@ -601,7 +519,6 @@ int main(int argc, char* argv[]) {
     map<int, int> ghost_to_owner;
     int n, edge_count;
 
-    // Timing for loading subgraphs
     double load_start_time = MPI_Wtime();
     LoadSubgraph(rank, G, local_nodes, ghost_nodes, ghost_to_owner, n, edge_count);
     double load_end_time = MPI_Wtime();
@@ -620,7 +537,6 @@ int main(int argc, char* argv[]) {
 
     SSSPTree T(n);
 
-    // Timing for initial SSSP computation
     double compute_start_time = MPI_Wtime();
     ComputeInitialSSSP(G, T, source, local_nodes, ghost_nodes, rank, num_procs, n);
     double compute_end_time = MPI_Wtime();
@@ -631,7 +547,6 @@ int main(int argc, char* argv[]) {
     vector<Edge> Del, Ins;
     LoadChanges(rank, Del, Ins, n);
 
-    // Timing for loading and broadcasting changes
     double load_changes_start_time = MPI_Wtime();
     int del_size = Del.size();
     MPI_Bcast(&del_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
@@ -639,15 +554,14 @@ int main(int argc, char* argv[]) {
         Del.reserve(del_size);
     }
     for (int i = 0; i < del_size; ++i) {
-        int data[3];
+        int data[2];
         if (rank == 0) {
             data[0] = Del[i].u;
             data[1] = Del[i].v;
-            data[2] = static_cast<int>(Del[i].weight * 1000);
         }
-        MPI_Bcast(data, 3, MPI_INT, 0, MPI_COMM_WORLD);
+        MPI_Bcast(data, 2, MPI_INT, 0, MPI_COMM_WORLD);
         if (rank != 0) {
-            Del.emplace_back(data[0], data[1], data[2] / 1000.0);
+            Del.emplace_back(data[0], data[1]);
         }
     }
     int ins_size = Ins.size();
@@ -672,7 +586,6 @@ int main(int argc, char* argv[]) {
         cout << "[Time] Load & Broadcast Changes: " << load_changes_end_time - load_changes_start_time << " seconds" << endl;
     }
 
-    // Timing for asynchronous updates
     double async_update_start_time = MPI_Wtime();
     AsynchronousUpdating(G, T, Del, Ins, source, A, local_nodes, ghost_nodes, ghost_to_owner, rank, num_procs);
     double async_update_end_time = MPI_Wtime();
@@ -680,7 +593,6 @@ int main(int argc, char* argv[]) {
         cout << "[Time] AsynchronousUpdating: " << async_update_end_time - async_update_start_time << " seconds" << endl;
     }
 
-    // Timing for ghost node reconciliation
     double ghost_reconcile_start_time = MPI_Wtime();
     vector<double> local_ghost_dist(n, numeric_limits<double>::infinity());
     vector<int> local_ghost_parent(n, -1);
@@ -708,7 +620,6 @@ int main(int argc, char* argv[]) {
         cout << "[Time] Ghost Reconciliation: " << ghost_reconcile_end_time - ghost_reconcile_start_time << " seconds" << endl;
     }
 
-    // Timing for output gathering
     double output_gather_start_time = MPI_Wtime();
     vector<pair<int, pair<double, int>>> local_output;
     for (int v : local_nodes) {
@@ -748,12 +659,11 @@ int main(int argc, char* argv[]) {
         cout << "[Time] Output Gathering: " << output_gather_end_time - output_gather_start_time << " seconds" << endl;
     }
 
-    // Writing output to file
     if (rank == 0) {
         string all_output_str(all_output.begin(), all_output.end());
         ofstream out("output_mpi.txt");
         if (!out.is_open()) {
-            cerr << "Rank 0: Error: Could not open output.txt" << endl;
+            cerr << "Rank 0: Error: Could not open output_mpi.txt" << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         out << "Vertex Distance Parent\n";
