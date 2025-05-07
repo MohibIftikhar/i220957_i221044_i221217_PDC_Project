@@ -14,7 +14,7 @@ using namespace std;
 struct Edge {
     int u, v;
     double weight;
-    Edge(int _u, int _v, double _w) : u(_u), v(_v), weight(_w) {}
+    Edge(int _u, int _v, double _w = -1.0) : u(_u), v(_v), weight(_w) {}
 };
 
 struct SSSPTree {
@@ -53,15 +53,15 @@ void ComputeInitialSSSP(const vector<vector<pair<int, double>>> &G, SSSPTree &T,
     }
 }
 
-void RemoveEdge(vector<vector<pair<int, double>>> &G, int u, int v, double weight) {
+void RemoveEdge(vector<vector<pair<int, double>>> &G, int u, int v) {
     G[u].erase(remove_if(G[u].begin(), G[u].end(),
-                         [v, weight](const pair<int, double> &e) {
-                             return e.first == v && e.second == weight;
+                         [v](const pair<int, double> &e) {
+                             return e.first == v;
                          }),
                G[u].end());
     G[v].erase(remove_if(G[v].begin(), G[v].end(),
-                         [u, weight](const pair<int, double> &e) {
-                             return e.first == u && e.second == weight;
+                         [u](const pair<int, double> &e) {
+                             return e.first == u;
                          }),
                G[v].end());
 }
@@ -72,7 +72,7 @@ void ProcessCE(vector<vector<pair<int, double>>> &G, SSSPTree &T, const vector<E
         int u = Del[i].u, v = Del[i].v;
 #pragma omp critical
         {
-            RemoveEdge(G, u, v, Del[i].weight);
+            RemoveEdge(G, u, v);
         }
         if (T.parent[v] == u) {
             T.dist[v] = numeric_limits<double>::infinity();
@@ -175,17 +175,37 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>> &G, SSSPTree &T, con
     }
 }
 
-int main() {
+#include <omp.h>
+#include <iostream>
+#include <fstream>
+#include <vector>
+#include <set>
+#include <sstream>
+#include <iomanip>
+#include <limits>
+#include <string>
+using namespace std;
 
-    cout << endl;
-    cout << "----------------- PARALLEL SSSP : OpenMP Version -----------------\n" << endl;
-    double start_time, end_time;
+// Assuming Edge, SSSPTree, ComputeInitialSSSP, and AsynchronousUpdating are defined elsewhere.
+
+int main(int argc, char* argv[]) {
+    cout << "\n----------------- PARALLEL SSSP : OpenMP Version -----------------\n\n";
+
+    if (argc < 2) {
+        cerr << "Usage: " << argv[0] << " <graph_file> [changes_file]\n";
+        return 1;
+    }
+
+    string graph_filename = argv[1];
+    string changes_filename = (argc >= 3) ? argv[2] : "";
+
+    double t_total_start = omp_get_wtime();
 
     // Read graph file
-    start_time = omp_get_wtime();
-    ifstream graph_file("graph.txt");
+    double t_read_start = omp_get_wtime();
+    ifstream graph_file(graph_filename);
     if (!graph_file.is_open()) {
-        cerr << "Error: Could not open graph.txt\n";
+        cerr << "Error: Could not open " << graph_filename << "\n";
         return 1;
     }
 
@@ -193,10 +213,10 @@ int main() {
     set<int> all_nodes;
     int u, v;
     double w;
-    
+
     while (graph_file >> u >> v >> w) {
         if (u < 0 || v < 0 || w < 0) {
-            cerr << "Error: Invalid edge values in graph.txt: " << u << " " << v << " " << w << "\n";
+            cerr << "Error: Invalid edge values in " << graph_filename << ": " << u << " " << v << " " << w << "\n";
             return 1;
         }
         all_nodes.insert(u);
@@ -206,68 +226,65 @@ int main() {
         G[v].push_back({u, w});
     }
     graph_file.close();
-    end_time = omp_get_wtime();
-    cout << "Time to read graph file: " << end_time - start_time << " seconds\n";
+    double t_read_end = omp_get_wtime();
 
-    // Read changes file
-    start_time = omp_get_wtime();
-    ifstream changes_file("changes.txt");
-    if (!changes_file.is_open()) {
-        cerr << "Error: Could not open changes.txt\n";
-        return 1;
-    }
-
+    // Read changes file (optional)
     vector<Edge> Del, Ins;
-    string line;
-    while (getline(changes_file, line)) {
-        if (line.empty()) continue;
-        istringstream iss(line);
-        char type;
-        int u, v;
-        double w;
-        if (!(iss >> type >> u >> v >> w)) {
-            cerr << "Error: Invalid line in changes.txt: " << line << "\n";
-            continue;
+    double t_changes_start = 0.0, t_changes_end = 0.0;
+    if (!changes_filename.empty()) {
+        t_changes_start = omp_get_wtime();
+        ifstream changes_file(changes_filename);
+        if (!changes_file.is_open()) {
+            cerr << "Error: Could not open " << changes_filename << "\n";
+            return 1;
         }
 
-        if (u < 0 || v < 0 || w < 0) {
-            cerr << "Error: Invalid edge values in changes.txt: " << line << "\n";
-            continue;
-        }
+        string line;
+        while (getline(changes_file, line)) {
+            if (line.empty()) continue;
+            istringstream iss(line);
+            char type;
+            int u, v;
+            double w;
 
-        if (type == 'D' || type == 'd') {
-            Del.emplace_back(u, v, w);
-        } else if (type == 'I' || type == 'i') {
-            Ins.emplace_back(u, v, w);
-        } else {
-            cerr << "Error: Unknown change type in line: " << line << "\n";
+            if (!(iss >> type >> u >> v)) {
+                cerr << "Error: Invalid line in " << changes_filename << ": " << line << "\n";
+                continue;
+            }
+
+            if (type == 'D' || type == 'd') {
+                Del.emplace_back(u, v);
+            } else if ((type == 'I' || type == 'i') && (iss >> w)) {
+                Ins.emplace_back(u, v, w);
+            } else {
+                cerr << "Error: Invalid format or unknown change type: " << line << "\n";
+            }
         }
+        changes_file.close();
+        t_changes_end = omp_get_wtime();
     }
-    changes_file.close();
-    end_time = omp_get_wtime();
-    cout << "Time to read changes file: " << end_time - start_time << " seconds\n";
 
-    // Compute initial SSSP
-    start_time = omp_get_wtime();
+    // Initial SSSP computation
+    double t_sssp_start = omp_get_wtime();
     int source = 0;
     int A = (G.size() > 10000) ? G.size() / 100 : 50;
-
     SSSPTree T(G.size());
     ComputeInitialSSSP(G, T, source);
-    end_time = omp_get_wtime();
-    cout << "Time to compute initial SSSP: " << end_time - start_time << " seconds\n";
+    double t_sssp_end = omp_get_wtime();
 
-    // Perform asynchronous updates
-    start_time = omp_get_wtime();
-    AsynchronousUpdating(G, T, Del, Ins, source, A);
-    end_time = omp_get_wtime();
-    cout << "Time for asynchronous updates: " << end_time - start_time << " seconds\n";
+    // Asynchronous updates
+    double t_async_start = 0.0, t_async_end = 0.0;
+    if (!changes_filename.empty()) {
+        t_async_start = omp_get_wtime();
+        AsynchronousUpdating(G, T, Del, Ins, source, A);
+        t_async_end = omp_get_wtime();
+    }
 
-    // Write output to file
-    start_time = omp_get_wtime();
+    // Write output
+    double t_write_start = omp_get_wtime();
     ofstream out("output_openmp.txt");
     if (!out.is_open()) {
-        cerr << "Error: Could not open output.txt\n";
+        cerr << "Error: Could not open output_openmp.txt\n";
         return 1;
     }
 
@@ -277,11 +294,42 @@ int main() {
         out << i << " " << T.dist[i] << " " << T.parent[i] << "\n";
     }
     out.close();
-    end_time = omp_get_wtime();
-    cout << "Time to write output file: " << end_time - start_time << " seconds\n" << endl;
+    double t_write_end = omp_get_wtime();
+
+    double t_total_end = omp_get_wtime();
+
+    // Convert to milliseconds
+    auto ms = [](double start, double end) {
+        return static_cast<int>((end - start) * 1000.0);
+    };
+
+    // Output performance summary
+    cout << "\n=== Performance Summary ===\n";
+    cout << "Total Vertices       : " << G.size() << "\n";
+    cout << "Source Vertex        : " << source << "\n";
+    cout << "\n--- Timing (ms) ---\n";
+    cout << "Graph Read           : " << ms(t_read_start, t_read_end) << " ms\n";
+    if (!changes_filename.empty()) {
+        cout << "Read Changes         : " << ms(t_changes_start, t_changes_end) << " ms\n";
+    } else {
+        cout << "Read Changes         : skipped\n";
+    }
+    cout << "Initial SSSP         : " << ms(t_sssp_start, t_sssp_end) << " ms\n";
+    if (!changes_filename.empty()) {
+        cout << "Asynchronous Update  : " << ms(t_async_start, t_async_end) << " ms\n";
+    } else {
+        cout << "Asynchronous Update  : skipped\n";
+    }
+    cout << "Write Output         : " << ms(t_write_start, t_write_end) << " ms\n";
+    cout << "Total Time           : " << ms(t_total_start, t_total_end) << " ms\n";
+    cout << "============================\n";
+    cout << "Output written to output_openmp.txt\n\n";
 
     return 0;
 }
 
-//  g++ -o e_omp parallel_openmp.cpp -fopenmp
-// time ./e_omp
+// g++ -o e_omp parallel_openmp.cpp -fopenmp
+// time ./e_omp ../Datasets/bio-CE/bio-CE-HT.edges 
+// time ./e_omp ../Datasets/bio-CE/bio-CE-HT.edges ../Datasets/bio-CE/bio-CE-HT_updates_500.edges
+
+//  time ./e_omp ../Datasets/bio-h/bio-h.edges
