@@ -158,11 +158,11 @@ void LoadSubgraph(int rank, vector<vector<pair<int, double>>>& G, set<int>& loca
 }
 
 // Load changes from changes.txt
-void LoadChanges(int rank, vector<Edge>& Del, vector<Edge>& Ins, int n) {
+void LoadChanges(string filename, int rank, vector<Edge>& Del, vector<Edge>& Ins, int n) {
     if (rank != 0) return; // Only rank 0 reads the file
-    ifstream change_stream("changes.txt");
+    ifstream change_stream(filename);
     if (!change_stream.is_open()) {
-        cerr << "Rank " << rank << ": Error: Could not open changes.txt" << endl;
+        cerr << "Rank " << rank << ": Error: Could not open" << filename << endl;
         MPI_Abort(MPI_COMM_WORLD, 1);
     }
     string line;
@@ -526,10 +526,10 @@ void AsynchronousUpdating(vector<vector<pair<int, double>>>& G, SSSPTree& T, con
 }
 
 // Main function
-int main(int argc, char* argv[]) {
-    cout << endl;
-    cout << "----------------- PARALLEL SSSP : MPI + OpenMP Version -----------------\n" << endl;
+#include <iomanip> // For std::setw, std::left, etc.
 
+
+int main(int argc, char* argv[]) {
     MPI_Init(&argc, &argv);
     int rank, num_procs;
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -537,9 +537,16 @@ int main(int argc, char* argv[]) {
 
     double start_total = MPI_Wtime();
     double start, end;
+    map<string, double> timings;
+
+    string changes_file;
+    if (argc >= 2) {
+        changes_file = argv[1];
+    }
 
     if (rank == 0) {
-        cout << "Number of subgraphs: " << num_procs << endl;
+        cout << "\n----------------- PARALLEL SSSP (MPI + OpenMP) -----------------\n";
+        cout << "Number of processes (subgraphs): " << num_procs << "\n";
     }
 
     vector<vector<pair<int, double>>> G;
@@ -550,13 +557,10 @@ int main(int argc, char* argv[]) {
     start = MPI_Wtime();
     LoadSubgraph(rank, G, local_nodes, ghost_nodes, ghost_to_owner, n, edge_count);
     end = MPI_Wtime();
-    if (rank == 0) cout << "[Time] LoadSubgraph: " << (end - start) << " seconds" << endl;
+    timings["LoadSubgraph"] = (end - start) * 1000.0;
 
     int total_edges = 0;
     MPI_Reduce(&edge_count, &total_edges, 1, MPI_INT, MPI_SUM, 0, MPI_COMM_WORLD);
-    if (rank == 0) {
-        cout << "Total number of edges across subgraphs: " << total_edges << endl;
-    }
 
     int source = 0;
     int A = max(50, n / 100);
@@ -565,52 +569,47 @@ int main(int argc, char* argv[]) {
     start = MPI_Wtime();
     ComputeInitialSSSP(G, T, source, local_nodes, ghost_nodes, rank, num_procs, n);
     end = MPI_Wtime();
-    if (rank == 0) cout << "[Time] ComputeInitialSSSP: " << (end - start) << " seconds" << endl;
+    timings["ComputeInitialSSSP"] = (end - start) * 1000.0;
 
     vector<Edge> Del, Ins;
     start = MPI_Wtime();
-    LoadChanges(rank, Del, Ins, n);
-    // Broadcast changes to all ranks
-    int del_size = Del.size();
-    MPI_Bcast(&del_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    if (rank != 0) {
-        Del.reserve(del_size);
-    }
-    for (int i = 0; i < del_size; ++i) {
-        int data[2];
-        if (rank == 0) {
-            data[0] = Del[i].u;
-            data[1] = Del[i].v;
+    if (!changes_file.empty()) {
+        LoadChanges(changes_file, rank, Del, Ins, n);
+
+        int del_size = Del.size();
+        MPI_Bcast(&del_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (rank != 0) Del.reserve(del_size);
+        for (int i = 0; i < del_size; ++i) {
+            int data[2];
+            if (rank == 0) {
+                data[0] = Del[i].u;
+                data[1] = Del[i].v;
+            }
+            MPI_Bcast(data, 2, MPI_INT, 0, MPI_COMM_WORLD);
+            if (rank != 0) Del.emplace_back(data[0], data[1]);
         }
-        MPI_Bcast(data, 2, MPI_INT, 0, MPI_COMM_WORLD);
-        if (rank != 0) {
-            Del.emplace_back(data[0], data[1]);
-        }
-    }
-    int ins_size = Ins.size();
-    MPI_Bcast(&ins_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
-    if (rank != 0) {
-        Ins.reserve(ins_size);
-    }
-    for (int i = 0; i < ins_size; ++i) {
-        int data[3];
-        if (rank == 0) {
-            data[0] = Ins[i].u;
-            data[1] = Ins[i].v;
-            data[2] = static_cast<int>(Ins[i].weight * 1000);
-        }
-        MPI_Bcast(data, 3, MPI_INT, 0, MPI_COMM_WORLD);
-        if (rank != 0) {
-            Ins.emplace_back(data[0], data[1], data[2] / 1000.0);
+
+        int ins_size = Ins.size();
+        MPI_Bcast(&ins_size, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (rank != 0) Ins.reserve(ins_size);
+        for (int i = 0; i < ins_size; ++i) {
+            int data[3];
+            if (rank == 0) {
+                data[0] = Ins[i].u;
+                data[1] = Ins[i].v;
+                data[2] = static_cast<int>(Ins[i].weight * 1000);
+            }
+            MPI_Bcast(data, 3, MPI_INT, 0, MPI_COMM_WORLD);
+            if (rank != 0) Ins.emplace_back(data[0], data[1], data[2] / 1000.0);
         }
     }
     end = MPI_Wtime();
-    if (rank == 0) cout << "[Time] Load & Broadcast Changes: " << (end - start) << " seconds" << endl;
+    timings["LoadAndBroadcastChanges"] = (end - start) * 1000.0;
 
     start = MPI_Wtime();
     AsynchronousUpdating(G, T, Del, Ins, source, A, local_nodes, ghost_nodes, ghost_to_owner, rank, num_procs);
     end = MPI_Wtime();
-    if (rank == 0) cout << "[Time] AsynchronousUpdating: " << (end - start) << " seconds" << endl;
+    timings["AsynchronousUpdating"] = (end - start) * 1000.0;
 
     start = MPI_Wtime();
     vector<double> local_ghost_dist(n, numeric_limits<double>::infinity());
@@ -635,7 +634,7 @@ int main(int argc, char* argv[]) {
     }
     T.parent[source] = -1;
     end = MPI_Wtime();
-    if (rank == 0) cout << "[Time] Ghost Reconciliation: " << (end - start) << " seconds" << endl;
+    timings["GhostReconciliation"] = (end - start) * 1000.0;
 
     start = MPI_Wtime();
     vector<pair<int, pair<double, int>>> local_output;
@@ -676,7 +675,7 @@ int main(int argc, char* argv[]) {
         string all_output_str(all_output.begin(), all_output.end());
         ofstream out("output_mpi_openmp.txt");
         if (!out.is_open()) {
-            cerr << "Rank 0: Error: Could not open output.txt" << endl;
+            cerr << "Error: Could not open output file." << endl;
             MPI_Abort(MPI_COMM_WORLD, 1);
         }
         out << "Vertex Distance Parent\n";
@@ -685,42 +684,39 @@ int main(int argc, char* argv[]) {
         string line;
         while (getline(all_ss, line)) {
             istringstream iss(line);
-            int v;
+            int v, parent;
             string dist_str;
-            int parent;
-            if (!(iss >> v >> dist_str >> parent)) {
-                cerr << "Rank 0: Error: Failed to parse output line: " << line << endl;
-                continue;
-            }
-            double dist;
-            if (dist_str == "inf") {
-                dist = numeric_limits<double>::infinity();
-            } else {
-                try {
-                    dist = stod(dist_str);
-                } catch (...) {
-                    cerr << "Rank 0: Error: Invalid distance in line: " << line << endl;
-                    continue;
-                }
-            }
+            if (!(iss >> v >> dist_str >> parent)) continue;
+            double dist = (dist_str == "inf") ? numeric_limits<double>::infinity() : stod(dist_str);
             final_output.emplace_back(v, make_pair(dist, parent));
         }
         sort(final_output.begin(), final_output.end());
         for (const auto& [v, data] : final_output) {
-            if (data.first >= numeric_limits<double>::infinity()) {
-                out << v << " inf " << data.second << "\n";
-            } else {
-                out << v << " " << fixed << setprecision(1) << data.first << " " << data.second << "\n";
-            }
+            out << v << " " << (data.first >= numeric_limits<double>::infinity() ? "inf" : to_string(data.first)) << " " << data.second << "\n";
         }
         out.close();
-        cout << "[Time] Output Gathering: " << (MPI_Wtime() - start) << " seconds" << endl;
-        cout << "Output written to output_mpi_openmp.txt" << endl;
     }
+    end = MPI_Wtime();
+    timings["OutputGathering"] = (end - start) * 1000.0;
 
     double end_total = MPI_Wtime();
-    if (rank == 0) cout << "[Total Time] Entire Execution: " << (end_total - start_total) << " seconds" << endl;
+    timings["TotalExecution"] = (end_total - start_total) * 1000.0;
+
+    if (rank == 0) {
+        cout << "\n----------------- PERFORMANCE SUMMARY (ms) -----------------\n";
+        cout << left << setw(35) << "Component" << right << setw(12) << "Time (ms)" << "\n";
+        cout << string(47, '-') << "\n";
+        for (const auto& [label, time_ms] : timings) {
+            cout << left << setw(35) << label << right << setw(12) << fixed << setprecision(2) << time_ms << "\n";
+        }
+        cout << "---------------------------------------------------------------\n";
+        cout << "Output written to output_mpi_openmp.txt\n";
+    }
 
     MPI_Finalize();
     return 0;
 }
+
+// mpicxx -o e_mpi_omp parallel_mpi_openmp.cpp -fopenmp
+// mpirun -np 2 ./e_mpi_omp
+// time mpirun -np 2 ./e_mpi_omp ../Datasets/bio-CE/bio-CE-HT_updates_500.edges
